@@ -4,12 +4,14 @@ import shutil
 import os
 import sys
 import pathlib
+from feeluown.consts import DATA_DIR
 
 HERE = pathlib.Path(__file__).resolve()
-ICONS_DIR = HERE.parent.parent / 'icons'
+ICONS_DIR = HERE.parent.parent / 'gui' / 'assets' / 'icons'
 
 mac_shell_str = """#!/bin/bash
-/usr/local/bin/feeluown --log-to-file
+export PATH=$PATH:/usr/local/bin/:/opt/homebrew/bin/
+feeluown --log-to-file
 """
 
 mac_plist_str = """<?xml version="1.0" encoding="UTF-8"?>
@@ -73,7 +75,8 @@ def gen_for_mac():
 def gen_for_win_linux():
     DESKTOP_FILE = 'feeluown.desktop'
     from_icon = ICONS_DIR / 'feeluown.png'
-    to_icon = pathlib.Path.home() / '.FeelUOwn' / 'feeluown.png'
+    to_icon = pathlib.Path(DATA_DIR) / 'feeluown.png'
+    to_icon.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(from_icon, to_icon)
 
     icon_string = win_linux_icon.format(feeluown_icon=to_icon)
@@ -110,9 +113,9 @@ def gen_for_win32():
     #   will tell user it has no priviledge to run this program
     pyexe = os.path.join(os.path.dirname(sys.executable), 'pythonw')
     command = '{} -m feeluown'.format(pyexe)
-    ico = HERE.parent.parent / 'icons' / 'feeluown.ico'
+    ico = HERE.parent.parent / 'gui' / 'assets' / 'icons' / 'feeluown.ico'
     name = 'FeelUOwn'
-    make_shortcut(command, name=name, icon=ico, terminal=False)
+    make_shortcut(command, name=name, icon=str(ico), terminal=False)
 
 
 def generate_icon():

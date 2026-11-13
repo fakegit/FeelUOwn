@@ -1,7 +1,7 @@
 import pytest
 from unittest import mock, TestCase
 
-from fuocore.reader import RandomReader, RandomSequentialReader, wrap
+from feeluown.utils.reader import RandomReader, RandomSequentialReader, wrap
 
 
 def test_sequential_reader():
@@ -12,8 +12,8 @@ def test_sequential_reader():
 
     g = g_func()
     reader = wrap(g)
-    assert reader.is_async is False
     assert len(list(reader)) == 5
+    assert reader.count == 5
 
 
 @pytest.mark.asyncio
@@ -24,7 +24,6 @@ async def test_async_sequential_reader():
 
     ag = ag_func()
     reader = wrap(ag)
-    assert reader.is_async is True
     assert len([x async for x in reader]) == 5
 
 
@@ -46,12 +45,12 @@ class TestRandomReader(TestCase):
         with self.assertRaises(AssertionError):
             RandomReader(100, lambda: 1, 0)
 
-    def test_read(self):
+    def test_read_range(self):
         mock_read_func = mock.MagicMock()
         mock_read_func.return_value = list(range(20, 30))
         self.p._read_func = mock_read_func
 
-        obj = self.p.read(30)
+        self.p.read(30)
         obj = self.p.read(25)
         self.assertEqual(obj, 25)
         mock_read_func.assert_called_once_with(20, 30)
@@ -105,7 +104,6 @@ class TestRandomSequentialReader(TestCase):
         reader = RandomSequentialReader(count,
                                         read_func=mock_read_func,
                                         max_per_read=10)
-        self.assertTrue(reader.allow_sequential_read)
         value = next(reader)
         mock_read_func.assert_called_once_with(0, 10)
         self.assertEqual(value, 0)

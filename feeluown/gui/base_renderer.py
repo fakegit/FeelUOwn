@@ -1,8 +1,15 @@
-from feeluown.gui.widgets.tabbar import Tab
+# mypy: disable-error-code=attr-defined
+# HELP: No good way to type mixin class, see feeluown.gui.helpers docstring for details.
+
+from abc import abstractmethod
+from typing import runtime_checkable, Protocol
+
+from feeluown.i18n import t
+from feeluown.library import ModelType
+from feeluown.gui.widgets.tabbar import Tab, TabBar
 
 
 class LibraryTabRendererMixin:
-
     def init_tabbar_signal_binding(self):
         for tab_id, signal in self.get_tabid_signal_mapping().items():
             signal.connect(self.on_tab_id_activated(tab_id))
@@ -36,7 +43,53 @@ class LibraryTabRendererMixin:
         def cb():
             if tab_id != self.tab_id:
                 self.show_by_tab_id(tab_id)
+
         return cb
 
     def show_by_tab_id(self, tab_id):
+        raise NotImplementedError
+
+
+class TabBarRendererMixin:
+    """
+    Requirements:
+    1. the instance MUST has `tabs` attribute
+    2. the instance MUST implement `render_by_tab_index`
+    """
+
+    def render_tab_bar(self):
+        tab_bar = TabBar()
+        ui = self._app.ui
+        ui.toolbar.add_stacked_widget(tab_bar)
+        ui.toolbar.set_top_stacked_widget(tab_bar)
+        for tab in self.tabs:
+            tab_bar.addTab(tab[0])
+        tab_bar.setCurrentIndex(self.tab_index)
+        tab_bar.tabBarClicked.connect(self.render_by_tab_index)
+
+    def render_by_tab_index(self, tab_index):
+        raise NotImplementedError
+
+    def default_tabs(self):
+        return [
+            (t("track"), ModelType.song, self.show_songs),
+            (t("album"), ModelType.album, self.show_albums),
+            (t("musician"), ModelType.artist, self.show_artists),
+            (t("playlist"), ModelType.playlist, self.show_playlists),
+            (t("video"), ModelType.video, self.show_videos),
+        ]
+
+
+@runtime_checkable
+class VFillableBg(Protocol):
+    """Protocol for widgets which has vertical fillable background
+
+    This protocol indicates the background of the widget is transparent. The parent
+    widget can fill color for the widget.
+
+    .. versionadded:: 3.8.9
+    """
+
+    @abstractmethod
+    def fillable_bg_height(self) -> int:
         raise NotImplementedError

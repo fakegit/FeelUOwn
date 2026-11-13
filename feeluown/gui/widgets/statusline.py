@@ -1,40 +1,49 @@
-from PyQt5.QtCore import Qt, QRectF
-from PyQt5.QtWidgets import QWidget, QHBoxLayout, QLabel
-from PyQt5.QtGui import QTextOption, QColor, QPalette, QPainter
+from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel
+from PyQt6.QtGui import QTextOption, QColor, QPalette, QPainter
 
 from feeluown.gui.helpers import SOLARIZED_COLORS
 
 
 class StatusLineItem:
-    """状态栏组件"""
+    """Status bar component"""
+
     def __init__(self, name, widget):
         self.name = name
         self.widget = widget
 
     def __eq__(self, other):
-        return isinstance(other, StatusLineItem) \
-            and other.name == self.name \
+        return (
+            isinstance(other, StatusLineItem)
+            and other.name == self.name
             and other.widget is self.widget
+        )
 
 
 class StatuslineLabel(QLabel):
     """
-    StatuslineLabel 是一个基类，具体的设计还没想好太清楚，不建议大范围使用。
+    This is a base class;
+    the specific design hasn’t been fully figured out yet,
+    and it’s not recommended for widespread use.
 
-    大概想法如下：Label 由两部分组成，中间和通知部分（参考 chrome 的插件图标）。
-    基类会定义好这两个部分的 size，并提供一些预定义好的绘制函数供子类使用。
+    The general idea is as follows: the Label consists of two parts, the middle and
+    the notification parts (see Chrome’s extension icon for reference).
+    The base class will define the sizes of these two parts and provide some
+    predefined drawing functions for subclasses to use.
     """
+
     def __init__(self, app, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         self._app = app
 
-        # TODO: 顶部导航栏中前进、后退按钮的的高度也是 30，之后应该由外部传入进来
+        # TODO: The height of the forward and back buttons in the top navigation bar
+        # is also 30, and it should be passed in externally later
         self._width = self._height = 30
         self._inner_width = self._inner_height = 18
         self._status_width = self._status_height = 13
         self._status_font_size = 8
-        self._status_color = 'red'
+        self._status_color = "red"
         self._pressed = False
 
         self.setFixedSize(self._width, self._height)
@@ -51,7 +60,7 @@ class StatuslineLabel(QLabel):
 
     def paintEvent(self, e):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         self.drawBg(painter)
 
@@ -72,7 +81,7 @@ class StatuslineLabel(QLabel):
             return
         radius = self._width // 2
         painter.save()
-        painter.setPen(Qt.NoPen)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(self._app.theme_mgr.get_pressed_color()))
         painter.drawRoundedRect(self.rect(), radius, radius)
         painter.restore()
@@ -86,7 +95,7 @@ class StatuslineLabel(QLabel):
         font.setPixelSize(self._status_font_size)
         painter.setFont(font)
         pen = painter.pen()
-        border_color = self.palette().color(QPalette.Window)
+        border_color = self.palette().color(QPalette.ColorRole.Window)
         pen.setColor(QColor(border_color))
         painter.setPen(pen)
         w = h = self._width // 2 - 2
@@ -97,12 +106,14 @@ class StatuslineLabel(QLabel):
         painter.setBrush(text_bg_color)
         radius = 4
         painter.drawRoundedRect(text_rect, radius, radius)
-        painter.drawText(text_rect, self.text(), QTextOption(Qt.AlignCenter))
+        painter.drawText(
+            text_rect, self.text(), QTextOption(Qt.AlignmentFlag.AlignCenter)
+        )
         painter.restore()
 
 
 class StatusLine(QWidget):
-    """状态栏（类似 Emacs/Vim status line）"""
+    """Status bar (similar to Emacs/Vim status line)"""
 
     def __init__(self, app, parent=None):
         super().__init__(parent)
@@ -118,14 +129,14 @@ class StatusLine(QWidget):
                 return item
 
     def add_item(self, item):
-        """添加组件"""
+        """Add component"""
         if item not in self._items:
             self._items.append(item)
             self._layout.addWidget(item.widget)
 
     def remove_item(self, item):
-        """移除组件
+        """Remove component
 
-        :param item: 一个 StatusLineItem 对象，或者 item 名字
+        :param item: A StatusLineItem object, or an item name
         """
         pass

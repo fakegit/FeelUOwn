@@ -1,8 +1,9 @@
-from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtWidgets import QHBoxLayout, QComboBox, QWidget
+from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtWidgets import QHBoxLayout, QComboBox, QWidget
 
-from feeluown.models import AlbumType
+from feeluown.library import AlbumType
 from feeluown.gui.widgets import TextButton
+from feeluown.i18n import t
 
 
 class SongsTableToolbar(QWidget):
@@ -15,16 +16,25 @@ class SongsTableToolbar(QWidget):
 
         self._tmp_buttons = []
 
-        self.play_all_btn = TextButton('播放全部', self)
+        self.play_all_btn = TextButton(t("play-all-button"), self)
         self.play_all_btn.clicked.connect(self.play_all_needed.emit)
 
-        self.play_all_btn.setObjectName('play_all')
+        self.play_all_btn.setObjectName("play_all")
 
         # album filters
         self.filter_albums_combobox = QComboBox(self)
-        self.filter_albums_combobox.addItems(['所有专辑', '标准', '单曲与EP', '现场', '合辑'])
+        self.filter_albums_combobox.addItems(
+            [
+                t("album-filter-all"),
+                t("album-filter-standard"),
+                t("album-filter-singular-or-ep"),
+                t("album-filter-live"),
+                t("album-filter-compilation-retrospective"),
+            ]
+        )
         self.filter_albums_combobox.currentIndexChanged.connect(
-            self.on_albums_filter_changed)
+            self.on_albums_filter_changed
+        )
         # 8 works on macOS, don't know if it works on various Linux DEs
         self.filter_albums_combobox.setMinimumContentsLength(8)
         self.filter_albums_combobox.hide()
@@ -41,30 +51,39 @@ class SongsTableToolbar(QWidget):
     def artists_mode(self):
         self._before_change_mode()
 
+    def manual_mode(self):
+        """fully customized mode
+
+        .. versionadded:: 3.7.11
+           You'd better use this mode and add_tmp_button to customize toolbar.
+        """
+        self._before_change_mode()
+
     def enter_state_playall_start(self):
         self.play_all_btn.setEnabled(False)
         # currently, this is called only when feeluown is fetching songs,
         # so when we enter state_playall_start, we set play all btn text
         # to this.
-        self.play_all_btn.setText('获取所有歌曲...')
+        self.play_all_btn.setText(t("play-all-button-fetching"))
 
     def enter_state_playall_end(self):
-        self.play_all_btn.setText('获取所有歌曲...done')
+        self.play_all_btn.setText(t("play-all-button-fetch-done"))
         self.play_all_btn.setEnabled(True)
-        self.play_all_btn.setText('播放全部')
+        self.play_all_btn.setText(t("play-all-button"))
 
     def add_tmp_button(self, button):
         """Append text button"""
         if button not in self._tmp_buttons:
             # FIXME(cosven): the button inserted isn't aligned with other buttons
-            self._layout.insertWidget(len(self._tmp_buttons) + 1, button)
+            index = len(self._tmp_buttons)
+            if self.play_all_btn.isVisible():
+                index = index + 1
+            self._layout.insertWidget(index, button)
             self._tmp_buttons.append(button)
 
     def _setup_ui(self):
         self._layout = QHBoxLayout(self)
-        # left margin of meta widget is 30, we align with it
-        # bottom margin of meta widget is 15, we should be larger than that
-        self._layout.setContentsMargins(30, 15, 30, 10)
+        self._layout.setContentsMargins(0, 0, 0, 10)
         self._layout.addWidget(self.play_all_btn)
         self._layout.addStretch(0)
         self._layout.addWidget(self.filter_albums_combobox)

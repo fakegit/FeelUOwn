@@ -4,6 +4,9 @@
 .iml
 .settings
 
+# pyinstaller
+/FeelUOwn.spec
+/FeelUOwnX.spec
 
 *.mp3
 
@@ -74,3 +77,8 @@ feeluown.egg-info/
 .pytest_cache/
 *.dat
 htmlcov/
+.aider*
+.tasks/
+
+# ignore *.dll
+*.dll

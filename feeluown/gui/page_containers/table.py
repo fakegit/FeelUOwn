@@ -2,32 +2,51 @@ import asyncio
 import logging
 import warnings
 from contextlib import suppress
+from typing import List
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtWidgets import QFrame, QVBoxLayout, QLabel
-from requests.exceptions import RequestException
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QImage, QPixmap, QPalette
+from PyQt6.QtWidgets import QFrame, QVBoxLayout, QLabel, QApplication, QWidget
+from requests.exceptions import RequestException  # type: ignore[import]
 
+from feeluown.i18n import t
 from feeluown.utils import aio
 from feeluown.utils.reader import wrap
 from feeluown.media import Media, MediaType
 from feeluown.excs import ProviderIOError
-from feeluown.library import ProviderFlags, ModelState, NotSupported, ModelFlags
-from feeluown.models import reverse, ModelType
+from feeluown.library import ModelState, ModelType, ModelNotFound
 
-from feeluown.gui.helpers import async_run, BgTransparentMixin, \
-    disconnect_slots_if_has, fetch_cover_wrapper
-from feeluown.gui.widgets.imglist import ImgListView
-from feeluown.gui.widgets.album import AlbumListModel, AlbumListView, \
-    AlbumFilterProxyModel
-from feeluown.gui.widgets.artist import ArtistListModel, ArtistListView, \
-    ArtistFilterProxyModel
-from feeluown.gui.widgets.video_list import VideoListModel, VideoListView, \
-    VideoFilterProxyModel
-from feeluown.gui.widgets.playlist import PlaylistListModel, PlaylistListView, \
-    PlaylistFilterProxyModel
-from feeluown.gui.widgets.songs import SongsTableModel, SongsTableView, \
-    SongFilterProxyModel
+from feeluown.gui.helpers import (
+    BgTransparentMixin,
+    disconnect_slots_if_has,
+    fetch_cover_wrapper,
+)
+from feeluown.gui.components import SongMenuInitializer
+from feeluown.gui.widgets.img_card_list import ImgCardListView
+from feeluown.gui.widgets.img_card_list import (
+    AlbumCardListModel,
+    AlbumCardListView,
+    AlbumFilterProxyModel,
+    AlbumCardListDelegate,
+    ArtistCardListModel,
+    ArtistCardListView,
+    ArtistFilterProxyModel,
+    VideoCardListModel,
+    VideoCardListView,
+    VideoFilterProxyModel,
+    VideoCardListDelegate,
+    PlaylistCardListModel,
+    PlaylistCardListView,
+    PlaylistFilterProxyModel,
+    PlaylistCardListDelegate,
+    ArtistCardListDelegate,
+)
+from feeluown.gui.widgets.songs import (
+    ColumnsMode,
+    SongsTableModel,
+    SongsTableView,
+    SongFilterProxyModel,
+)
 from feeluown.gui.widgets.comment_list import CommentListView, CommentListModel
 from feeluown.gui.widgets.meta import TableMetaWidget
 from feeluown.gui.widgets.table_toolbar import SongsTableToolbar
@@ -37,14 +56,14 @@ logger = logging.getLogger(__name__)
 
 
 class Renderer:
-    async def setUp(self, container):
+    async def setUp(self, container: "TableContainer"):
         # pylint: disable=attribute-defined-outside-init
         self.container = container
         self.meta_widget = container.meta_widget
         self.desc_widget = container.desc_widget
         self.toolbar = container.toolbar
         self.tabbar = container.tabbar
-        self.songs_table = container.songs_table
+        self.songs_table: SongsTableView = container.songs_table
         self.albums_table = container.albums_table
         self.artists_table = container.artists_table
         self.videos_table = container.videos_table
@@ -52,8 +71,6 @@ class Renderer:
         self.comments_table = container.comments_table
         # pylint: disable=protected-access
         self._app = container._app
-
-        self.real_show_model = container.show_model
 
     async def render(self):
         """render contents in table container
@@ -75,80 +92,87 @@ class Renderer:
         self.container.current_extra = extra
 
     async def show_cover(self, cover, cover_uid, as_background=False):
-        cover = Media(cover, MediaType.image)
-        url = cover.url
+        cover_media = (
+            cover if isinstance(cover, Media) else Media(cover, MediaType.image)
+        )
+        await self.show_cover_media(cover_media, cover_uid, as_background=as_background)
+
+    async def show_cover_media(self, cover_media: Media, cover_uid, as_background=False):
         app = self._app
-        content = await app.img_mgr.get(url, cover_uid)
+        content = await app.img_mgr.get(cover_media, cover_uid)
         img = QImage()
         img.loadFromData(content)
         pixmap = QPixmap(img)
         if not pixmap.isNull():
             if as_background:
-                self.meta_widget.set_cover_pixmap(None)
+                self.meta_widget.set_cover_image(None)
                 self._app.ui.right_panel.show_background_image(pixmap)
             else:
                 self._app.ui.right_panel.show_background_image(None)
-                self.meta_widget.set_cover_pixmap(pixmap)
+                self.meta_widget.set_cover_image(img)
             self._app.ui.table_container.updateGeometry()
 
-    def show_model(self, model):
-        aio.create_task(self.real_show_model(model))
-
     def show_albums(self, reader):
-        self._show_model_with_cover(reader,
-                                    self.albums_table,
-                                    AlbumListModel,
-                                    AlbumFilterProxyModel)
+        self._show_model_with_cover(
+            reader, self.albums_table, AlbumCardListModel, AlbumFilterProxyModel
+        )
 
     def show_artists(self, reader):
-        self._show_model_with_cover(reader,
-                                    self.artists_table,
-                                    ArtistListModel,
-                                    ArtistFilterProxyModel)
+        self._show_model_with_cover(
+            reader, self.artists_table, ArtistCardListModel, ArtistFilterProxyModel
+        )
 
     def show_videos(self, reader):
-        self._show_model_with_cover(reader,
-                                    self.videos_table,
-                                    VideoListModel,
-                                    VideoFilterProxyModel)
+        self._show_model_with_cover(
+            reader, self.videos_table, VideoCardListModel, VideoFilterProxyModel
+        )
 
     def show_playlists(self, reader):
-        self._show_model_with_cover(reader,
-                                    self.playlists_table,
-                                    PlaylistListModel,
-                                    PlaylistFilterProxyModel)
+        self._show_model_with_cover(
+            reader,
+            self.playlists_table,
+            PlaylistCardListModel,
+            PlaylistFilterProxyModel,
+        )
 
     def _show_model_with_cover(self, reader, table, model_cls, filter_model_cls):
         self.container.current_table = table
         filter_model = filter_model_cls()
         source_name_map = {p.identifier: p.name for p in self._app.library.list()}
-        model = model_cls(reader,
-                          fetch_cover_wrapper(self._app.img_mgr),
-                          source_name_map=source_name_map)
+        model = model_cls(
+            reader, fetch_cover_wrapper(self._app), source_name_map=source_name_map
+        )
         filter_model.setSourceModel(model)
         table.setModel(filter_model)
         table.scrollToTop()
         disconnect_slots_if_has(self._app.ui.magicbox.filter_text_changed)
         self._app.ui.magicbox.filter_text_changed.connect(filter_model.filter_by_text)
 
-    def show_songs(self, reader, show_count=False):
+    def show_songs(self, reader, show_count=False, columns_mode=ColumnsMode.normal):
+        """
+        .. versionadded: v3.8.5
+           The *hide_columns* parameter.
+        """
         reader = wrap(reader)
-        self.container.current_table = self.songs_table
-        self.toolbar.show()
-
         if show_count:
             count = reader.count
             self.meta_widget.songs_count = -1 if count is None else count
-
         source_name_map = {p.identifier: p.name for p in self._app.library.list()}
         model = SongsTableModel(
             source_name_map=source_name_map,
             reader=reader,
-            parent=self.songs_table)
+            parent=self.songs_table,
+        )
+        self.show_songs_by_model(model, columns_mode=columns_mode)
+
+    def show_songs_by_model(self, model, columns_mode=ColumnsMode.normal):
+        self.container.current_table = self.songs_table
+        self.toolbar.show()
         filter_model = SongFilterProxyModel(self.songs_table)
         filter_model.setSourceModel(model)
         self.songs_table.setModel(filter_model)
         self.songs_table.scrollToTop()
+        self.songs_table.set_columns_mode(columns_mode)
         disconnect_slots_if_has(self._app.ui.magicbox.filter_text_changed)
         self._app.ui.magicbox.filter_text_changed.connect(filter_model.filter_by_text)
 
@@ -163,127 +187,9 @@ class Renderer:
         model = CommentListModel(reader)
         self.comments_table.setModel(model)
 
-
-class ArtistRenderer(Renderer):
-    def __init__(self, artist):
-        self.artist = artist
-
-    async def render(self):
-        artist = self.artist
-
-        # bind signal first
-        # we only show album that implements create_albums_g
-        if artist.meta.allow_create_albums_g:
-            self.toolbar.filter_albums_needed.connect(
-                lambda types: self.albums_table.model().filter_by_types(types))
-            self.tabbar.show_albums_needed.connect(
-                lambda: self.show_albums(self.artist.create_albums_g()))
-        if hasattr(artist, 'contributed_albums') and artist.contributed_albums:
-            # show contributed_album list
-            self.tabbar.show_contributed_albums_needed.connect(
-                lambda: self.show_albums(self.artist.create_contributed_albums_g()))
-
-        # fetch and render basic metadata
-        self.meta_widget.title = artist.name
-        self.meta_widget.show()
-        self.tabbar.show()
-        self.tabbar.artist_mode()
-
-        # fetch and render songs
-        reader = None
-        if artist.meta.allow_create_songs_g:
-            reader = wrap(artist.create_songs_g())
-            self.tabbar.show_songs_needed.connect(
-                lambda: self.show_songs(reader=wrap(artist.create_songs_g()),
-                                        show_count=True))
-        else:
-            songs = await async_run(lambda: artist.songs)
-            reader = wrap(songs)
-            self.tabbar.show_songs_needed.connect(
-                lambda: self.show_songs(reader=wrap(songs), show_count=True))
-        self.show_songs(reader=reader, show_count=True)
-
-        # finally, we render cover and description
-        cover = await async_run(lambda: artist.cover)
-        if cover:
-
-            aio.create_task(
-                self.show_cover(cover, reverse(artist, '/cover'), as_background=True))
-
-        self.tabbar.show_desc_needed.connect(lambda: aio.create_task(self._show_desc()))
-
-    async def _show_desc(self):
-        with suppress(ProviderIOError, RequestException):
-            desc = await async_run(lambda: self.artist.desc)
-            self.show_desc(desc)
-
-
-class PlaylistRenderer(Renderer):
-    def __init__(self, playlist):
-        self.playlist = playlist
-
-    async def render(self):
-        playlist = self.playlist
-
-        # show playlist title
-        self.meta_widget.show()
-        self.meta_widget.title = playlist.name
-
-        # show playlist song list
-        with suppress(ProviderIOError):
-            if playlist.meta.allow_create_songs_g:
-                reader = wrap(playlist.create_songs_g())
-            else:
-                songs = await async_run(lambda: playlist.songs)
-                reader = wrap(songs)
-            self.show_songs(reader=reader, show_count=True)
-
-        # show playlist cover
-        if playlist.cover:
-            aio.create_task(
-                self.show_cover(playlist.cover, reverse(playlist, '/cover')))
-
-        def remove_song(song):
-            playlist.remove(song.identifier)
-
-        self.songs_table.remove_song_func = remove_song
-        self.tabbar.show_desc_needed.connect(lambda: aio.create_task(self._show_desc()))
-
-    async def _show_desc(self):
-        with suppress(ProviderIOError):
-            desc = await async_run(lambda: self.playlist.desc)
-            self.show_desc(desc)
-
-
-class AlbumRenderer(Renderer):
-    def __init__(self, album):
-        self.album = album
-
-    async def render(self):
-        album = self.album
-
-        songs = await async_run(lambda: album.songs)
-        self.show_songs(wrap(songs))
-
-        self.meta_widget.title = album.name_display
-        self.meta_widget.songs_count = len(songs)
-        self.meta_widget.creator = album.artists_name_display
-        self.meta_widget.show()
-
-        # fetch cover and description
-        cover = await async_run(lambda: album.cover)
-        if cover:
-            aio.create_task(self.show_cover(cover, reverse(album, '/cover')))
-
-        self.tabbar.show()
-        self.tabbar.album_mode()
-        self.tabbar.show_desc_needed.connect(lambda: aio.create_task(self._show_desc()))
-        self.tabbar.show_songs_needed.connect(lambda: self.show_songs(songs))
-
-    async def _show_desc(self):
-        with suppress(ProviderIOError):
-            desc = await async_run(lambda: self.album.desc)
-            self.show_desc(desc)
+    def _get_source_alias(self, source):
+        provider = self._app.library.get(source)
+        return provider.name if provider is not None else ""
 
 
 class SongsCollectionRenderer(Renderer):
@@ -296,7 +202,7 @@ class SongsCollectionRenderer(Renderer):
         self.meta_widget.title = collection.name
         self.meta_widget.updated_at = collection.updated_at
         self.meta_widget.created_at = collection.created_at
-        self.songs_table.remove_song_func = collection.remove
+        self.songs_table.remove_song_func = self.remove_song
         self._show_songs()
 
         # only show tabbar if description is not empty
@@ -306,12 +212,25 @@ class SongsCollectionRenderer(Renderer):
             self.tabbar.album_mode()
             self.tabbar.show_songs_needed.connect(self._show_songs)
             self.tabbar.show_desc_needed.connect(
-                lambda: self.show_desc(self.collection.description))
+                lambda: self.show_desc(self.collection.description)
+            )
 
     def _show_songs(self):
         """filter model with other type"""
-        self.show_songs(wrap([model for model in self.collection.models
-                              if model.meta.model_type == ModelType.song]))
+        self.show_songs(
+            wrap(
+                [
+                    model
+                    for model in self.collection.models
+                    if model.meta.model_type == ModelType.song
+                ]
+            )
+        )
+
+    def remove_song(self, song):
+        self.collection.remove(song)
+        # Re-render songs table so that user can see that the song is removed.
+        self._show_songs()
 
 
 class AlbumsCollectionRenderer(Renderer):
@@ -321,7 +240,8 @@ class AlbumsCollectionRenderer(Renderer):
     async def render(self):
         # always bind signals first
         self.toolbar.filter_albums_needed.connect(
-            lambda types: self.albums_table.model().filter_by_types(types))
+            lambda types: self.albums_table.model().filter_by_types(types)
+        )
 
         self.show_albums(self.reader)
 
@@ -348,7 +268,11 @@ class DescLabel(QLabel):
 
         self.setContentsMargins(30, 15, 30, 10)
         self.setWordWrap(True)
-        self.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        self.palette().setColor(
+            QPalette.ColorRole.Window, self.palette().color(QPalette.ColorRole.Base)
+        )
 
 
 class TableContainer(QFrame, BgTransparentMixin):
@@ -358,17 +282,25 @@ class TableContainer(QFrame, BgTransparentMixin):
         self._app = app
         self._renderer = None
         self._table = None  # current visible table
-        self._tables = []
+        self._tables: List[QWidget] = []
 
         self._extra = None
         self.toolbar = SongsTableToolbar()
         self.tabbar = TableTabBarV2()
-        self.meta_widget = TableMetaWidget(parent=self)
-        self.songs_table = SongsTableView(parent=self)
-        self.albums_table = AlbumListView(parent=self)
-        self.artists_table = ArtistListView(parent=self)
-        self.videos_table = VideoListView(parent=self)
-        self.playlists_table = PlaylistListView(parent=self)
+        self.meta_widget = TableMetaWidget(app=self._app, parent=self)
+        self.songs_table = SongsTableView(app=self._app, parent=self)
+        self.albums_table = AlbumCardListView(parent=self)
+        self.albums_table.setItemDelegate(
+            AlbumCardListDelegate(self.albums_table, img_min_width=120)
+        )
+        self.artists_table = ArtistCardListView(parent=self)
+        self.artists_table.setItemDelegate(ArtistCardListDelegate(self.artists_table))
+        self.videos_table = VideoCardListView(parent=self)
+        self.videos_table.setItemDelegate(VideoCardListDelegate(self.videos_table))
+        self.playlists_table = PlaylistCardListView(parent=self)
+        self.playlists_table.setItemDelegate(
+            PlaylistCardListDelegate(self.playlists_table)
+        )
         self.comments_table = CommentListView(parent=self)
         self.desc_widget = DescLabel(parent=self)
 
@@ -380,44 +312,54 @@ class TableContainer(QFrame, BgTransparentMixin):
         self._tables.append(self.comments_table)
 
         self.songs_table.play_song_needed.connect(
-            lambda song: asyncio.ensure_future(self.play_song(song)))
-        self.videos_table.play_video_needed.connect(
-            lambda video: aio.create_task(self.play_video(video)))
+            lambda song: aio.run_afn(self.play_song, song)
+        )
+        self.videos_table.play_video_needed.connect(self._app.playlist.play_model)
 
         def goto_model(model):
             self._app.browser.goto(model=model)
 
-        for signal in [self.songs_table.show_artist_needed,
-                       self.songs_table.show_album_needed,
-                       self.albums_table.show_album_needed,
-                       self.artists_table.show_artist_needed,
-                       self.playlists_table.show_playlist_needed,
-                       ]:
+        for signal in [
+            self.songs_table.show_artist_needed,
+            self.songs_table.show_album_needed,
+            self.albums_table.show_album_needed,
+            self.artists_table.show_artist_needed,
+            self.playlists_table.show_playlist_needed,
+        ]:
             signal.connect(goto_model)
 
-        self.toolbar.play_all_needed.connect(self.play_all)
+        self.toolbar.play_all_needed.connect(lambda: aio.run_afn(self.play_all))
         self.songs_table.add_to_playlist_needed.connect(self._add_songs_to_playlist)
-        self.songs_table.about_to_show_menu.connect(self._songs_table_about_to_show_menu)
+        self.songs_table.about_to_show_menu.connect(
+            self._songs_table_about_to_show_menu
+        )
         self.songs_table.activated.connect(
-            lambda index: aio.create_task(self._on_songs_table_activated(index)))
+            lambda index: aio.create_task(self._on_songs_table_activated(index))
+        )
 
         self._setup_ui()
 
     def _setup_ui(self):
         self.current_table = None
         self.tabbar.hide()
-        self.meta_widget.add_tabbar(self.tabbar)
         self.desc_widget.hide()
 
         self._layout = QVBoxLayout(self)
-        self._layout.addWidget(self.meta_widget)
-        self._layout.addWidget(self.toolbar)
-        self._layout.addSpacing(10)
-        self._layout.addWidget(self.desc_widget)
+        self._v_layout = QVBoxLayout()
+
+        self._v_layout.addWidget(self.meta_widget)
+        self._v_layout.addSpacing(15)
+        self._v_layout.addWidget(self.toolbar)
+        self._v_layout.addWidget(self.desc_widget)
+
+        # Since QTableView has a margin on the left and right(see SongsTableDelegate),
+        # so set the v_layout left margin to same value(0) to align widgets.
+        self._v_layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.addLayout(self._v_layout)
         for table in self._tables:
             self._layout.addWidget(table)
         self._layout.addStretch(0)
-        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setContentsMargins(20, 0, 20, 0)
         self._layout.setSpacing(0)
 
     @property
@@ -447,9 +389,9 @@ class TableContainer(QFrame, BgTransparentMixin):
         show table and hide other tables, if table is None,
         hide all tables.
         """
-        for t in self._tables:
-            if t != table:
-                t.hide()
+        for tb in self._tables:
+            if tb != table:
+                tb.hide()
         if table is None:
             self.toolbar.hide()
         else:
@@ -461,7 +403,7 @@ class TableContainer(QFrame, BgTransparentMixin):
                 self.toolbar.albums_mode()
             if table is self.songs_table:
                 self.toolbar.songs_mode()
-        if isinstance(self._table, ImgListView):
+        if isinstance(self._table, ImgCardListView):
             self._table.setModel(None)
         self._table = table
 
@@ -480,8 +422,9 @@ class TableContainer(QFrame, BgTransparentMixin):
             await self._renderer.tearDown()
         self.meta_widget.hide()
         self.meta_widget.clear()
+        self.meta_widget.add_tabbar(self.tabbar)
         self.tabbar.hide()
-        self.tabbar.check_default()
+        self.tabbar.restore_default()
         self.current_table = None
         self.current_extra = None
         # clean right_panel background image
@@ -493,7 +436,12 @@ class TableContainer(QFrame, BgTransparentMixin):
             self.tabbar.show_songs_needed,
             self.tabbar.show_artists_needed,
             self.tabbar.show_playlists_needed,
+            self.tabbar.show_videos_needed,
             self.tabbar.show_desc_needed,
+            self.artists_table.remove_item_needed,
+            self.albums_table.remove_item_needed,
+            self.playlists_table.remove_item_needed,
+            self.videos_table.remove_item_needed,
         )
         for signal in signals:
             disconnect_slots_if_has(signal)
@@ -510,46 +458,29 @@ class TableContainer(QFrame, BgTransparentMixin):
         await self._renderer.render()
 
     async def play_song(self, song):
-        self._app.player.play_song(song)
+        self._app.playlist.play_model(song)
 
-    async def play_video(self, video):
-        media = await aio.run_in_executor(None, lambda: video.media)
-        self._app.player.play(media)
-
-    def play_all(self):
-        task_name = 'play-all'
+    async def play_all(self):
+        task_name = "play-all"
         task_spec = self._app.task_mgr.get_or_create(task_name)
-
-        def reader_readall_cb(task):
-            with suppress(ProviderIOError, asyncio.CancelledError):
-                songs = task.result()
-                self._app.player.play_songs(songs=songs)
-            self.toolbar.enter_state_playall_end()
-
         model = self.songs_table.model()
-        # FIXME: think about a more elegant way
-        reader = model.sourceModel()._reader
-        if reader is not None:
-            if reader.count is not None:
-                task = task_spec.bind_blocking_io(reader.readall)
-                self.toolbar.enter_state_playall_start()
-                task.add_done_callback(reader_readall_cb)
-                return
-        songs = model.sourceModel().songs
-        self._app.player.play_songs(songs=songs)
-
-    async def show_model(self, model):
-        model = self._app.library.cast_model_to_v1(model)
-        model_type = ModelType(model.meta.model_type)
-        if model_type == ModelType.album:
-            renderer = AlbumRenderer(model)
-        elif model_type == ModelType.artist:
-            renderer = ArtistRenderer(model)
-        elif model_type == ModelType.playlist:
-            renderer = PlaylistRenderer(model)
-        else:
-            renderer = None
-        await self.set_renderer(renderer)
+        assert isinstance(model, SongFilterProxyModel)
+        source_model = model.sourceModel()
+        assert isinstance(source_model, SongsTableModel)
+        # FIXME: think about a more elegant way to get reader.
+        reader = source_model.reader
+        if reader is not None and reader.count is not None:
+            self.toolbar.enter_state_playall_start()
+            with suppress(ProviderIOError, asyncio.CancelledError):
+                songs = await task_spec.bind_blocking_io(reader.readall)
+                self._app.playlist.set_models(songs)
+                task = self._app.playlist.next()
+                if task is not None:
+                    await task
+                    self._app.player.resume()
+            self.toolbar.enter_state_playall_end()
+            return
+        assert False, "The play_all_btn should be hide in this page"
 
     def show_collection(self, coll):
         renderer = SongsCollectionRenderer(coll)
@@ -557,43 +488,36 @@ class TableContainer(QFrame, BgTransparentMixin):
 
     def show_songs(self, songs=None, songs_g=None):
         """(DEPRECATED) provided only for backward compatibility"""
-        warnings.warn('use readerer.show_songs please')
+        warnings.warn("use readerer.show_songs please")
         renderer = Renderer()
         task = aio.create_task(self.set_renderer(renderer))
         if songs is not None:
             reader = wrap(songs)
         else:
             reader = songs_g
-        task.add_done_callback(
-            lambda _: renderer.show_songs(reader=reader))
+        task.add_done_callback(lambda _: renderer.show_songs(reader=reader))
 
     def show_albums_coll(self, albums_g):
+        warnings.warn("use readerer.show_albums please")
         aio.create_task(self.set_renderer(AlbumsCollectionRenderer(albums_g)))
 
     def show_artists_coll(self, artists_g):
+        warnings.warn("use readerer.show_artists please")
         aio.create_task(self.set_renderer(ArtistsCollectionRenderer(artists_g)))
-
-    def search(self, text):
-        if self.isVisible() and self.songs_table is not None:
-            self.songs_table.filter_row(text)
 
     def _add_songs_to_playlist(self, songs):
         for song in songs:
             self._app.playlist.add(song)
 
     def _songs_table_about_to_show_menu(self, ctx):
-        add_action = ctx['add_action']
-        models = ctx['models']
+        models = ctx["models"]
         if not models or models[0].meta.model_type != ModelType.song:
             return
 
+        menu = ctx["menu"]
         song = models[0]
-        goto = self._app.browser.goto
-
-        if self._app.library.check_flags_by_model(song, ProviderFlags.similar):
-            add_action('相似歌曲', lambda *args: goto(model=song, path='/similar'))
-        if self._app.library.check_flags_by_model(song, ProviderFlags.hot_comments):
-            add_action('歌曲评论', lambda *args: goto(model=song, path='/hot_comments'))
+        menu.addSeparator()
+        SongMenuInitializer(self._app, song).apply(menu)
 
     async def _on_songs_table_activated(self, index):
         """
@@ -601,24 +525,39 @@ class TableContainer(QFrame, BgTransparentMixin):
         """
         from feeluown.gui.widgets.songs import Column
 
-        song = index.data(Qt.UserRole)
+        song = index.data(Qt.ItemDataRole.UserRole)
         if index.column() == Column.song:
-            self.songs_table.play_song_needed.emit(song)
+            alt_pressed = bool(
+                QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier
+            )
+            need_replace = self._app.config.ENABLE_REPLACE_PLAYLIST_ON_DBLCLICK
+            # .. versionadded:: 3.7.11
+            #    Replace playlist with songs in table.
+            if need_replace != alt_pressed:
+                model = self.songs_table.model()
+                if isinstance(model, SongFilterProxyModel):
+                    model = model.sourceModel()
+                    if isinstance(model, SongsTableModel):
+                        reader = model.reader
+                        songs = await aio.run_fn(reader.readall)
+                        self._app.playlist.clear()
+                        self._app.playlist.set_models(songs)
+            self._app.playlist.play_model(song)
         else:
             try:
                 song = await aio.run_in_executor(
-                    None, self._app.library.song_upgrade, song)
-            except NotSupported:
-                assert ModelFlags.v2 & song.meta.flags
-                self._app.show_msg('资源提供放不支持该功能')
-                logger.info(f'provider:{song.source} does not support song_get')
+                    None, self._app.library.song_upgrade, song
+                )
+            except ModelNotFound as e:
+                self._app.show_msg(t("provider-missing-feature", errorMessage=e))
+                logger.info(f"provider:{song.source} does not support song_get")
                 song.state = ModelState.cant_upgrade
             except (ProviderIOError, RequestException) as e:
                 # FIXME: we should only catch ProviderIOError here,
-                # but currently, some plugins such fuo-qqmusic may raise
+                # but currently, some plugins such like fuo-qqmusic may raise
                 # requests.RequestException
-                logger.exception('upgrade song failed')
-                self._app.show_msg(f'请求失败: {str(e)}')
+                logger.exception("upgrade song failed")
+                self._app.show_msg(t("provider-network-error", errorMessage=e))
             else:
                 if index.column() == Column.artist:
                     artists = song.artists

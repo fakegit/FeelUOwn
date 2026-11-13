@@ -1,30 +1,48 @@
 # -*- coding: utf-8 -*-
 
 import logging
-import os
 import sys
+import socket
 import time
+import warnings
 from collections import OrderedDict
 from copy import copy, deepcopy
 from functools import wraps
 from itertools import filterfalse
+import urllib.request
 
-from feeluown.utils.reader import wrap as reader_wrap
-
+from feeluown.i18n import human_readable_number
 
 logger = logging.getLogger(__name__)
 
 
-def use_mpv_old():
+def win32_is_port_binded(host, port):
+    """
+    sock.connect_ex may block for 2 second if port is not used on Windows.
+    This may be the fastest way to check if a port is bined on Windows.
+    Remember that (127.0.0.1, port) and (0.0.0.0, port) are different for `sock.bind`.
+    """
+    import errno  # pylint: disable=import-outside-toplevel
+
+    inuse = False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        import mpv  # noqa
-    except AttributeError as e:
-        # undefined symbol: mpv_render_context_create
-        msg = str(e)
-        if 'undefined symbol' in msg:
-            logger.info(f'use mpv old because of err: {msg}')
-            return True
-    return False
+        sock.bind((host, port))
+    except socket.error as e:
+        if e.errno == errno.EADDRINUSE:
+            inuse = True
+        else:
+            raise
+    finally:
+        sock.close()
+    return inuse
+
+
+def is_port_inuse(port):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    rv = sock.connect_ex(("127.0.0.1", port))
+    sock.close()
+    return rv == 0
 
 
 def parse_ms(ms):
@@ -39,9 +57,11 @@ def log_exectime(func):
         t = time.process_time()
         result = func(*args, **kwargs)
         elapsed_time = time.process_time() - t
-        logger.debug('function %s executed time: %f ms',
-                     func.__name__, elapsed_time * 1000)
+        logger.debug(
+            "function %s executed time: %f ms", func.__name__, elapsed_time * 1000
+        )
         return result
+
     return wrapper
 
 
@@ -60,80 +80,20 @@ def elfhash(s):
         hash = (hash << 4) + c
         x = hash & 0xF0000000
         if x:
-            hash ^= (x >> 24)
+            hash ^= x >> 24
             hash &= ~x
-    return (hash & 0x7FFFFFFF)
-
-
-def find_previous(element, list_):
-    """
-    find previous element in a sorted list
-
-    >>> find_previous(0, [0])
-    0
-    >>> find_previous(2, [1, 1, 3])
-    1
-    >>> find_previous(0, [1, 2])
-    >>> find_previous(1.5, [1, 2])
-    1
-    >>> find_previous(3, [1, 2])
-    2
-    """
-    length = len(list_)
-    for index, current in enumerate(list_):
-        # current is the last element
-        if length - 1 == index:
-            return current
-
-        # current is the first element
-        if index == 0:
-            if element < current:
-                return None
-
-        if current <= element < list_[index+1]:
-            return current
-
-
-def get_osx_theme():
-    """1 for dark, -1 for light"""
-    with os.popen('defaults read -g AppleInterfaceStyle') as pipe:
-        theme = pipe.read().strip()
-    return 1 if theme == 'Dark' else -1
-
-
-def to_reader(model, field):
-    flag_attr = 'allow_create_{}_g'.format(field)
-    method_attr = 'create_{}_g'.format(field)
-
-    flag_g = getattr(model.meta, flag_attr)
-
-    if flag_g:
-        return reader_wrap(getattr(model, method_attr)())
-
-    value = getattr(model, field, None)
-    if value is None:
-        return reader_wrap([])
-    if isinstance(value, (list, tuple)):
-        return reader_wrap(value)
-    return reader_wrap(iter(value))  # TypeError if not iterable
-
-
-def to_readall_reader(*args, **kwargs):
-    """
-    hack: set SequentialReader reader's count to 1000 if it is None
-    so that we can call readall method.
-    """
-    reader = to_reader(*args, **kwargs)
-    if reader.count is None:
-        reader.count = 1000
-    return reader
+    return hash & 0x7FFFFFFF
 
 
 class DedupList(list):
-    """ List that doesn't contain duplicate items """
+    """List that doesn't contain duplicate items
+
+    The item should properly implement __hash__ and __eq__. If items
+    are not equal to each other, they must not have same hash.
+    """
 
     def _get_index(self, index):
-        """ project idx into range(len) """
+        """project idx into range(len)"""
         if index <= -len(self):
             return 0
         if index < 0:
@@ -144,7 +104,7 @@ class DedupList(list):
 
     @staticmethod
     def dic():
-        """ return a dict that remembers insertion order """
+        """return a dict that remembers insertion order"""
         return {} if sys.version_info[1] > 5 else OrderedDict()
 
     def __init__(self, seq=(), dedup=True):
@@ -220,7 +180,7 @@ class DedupList(list):
 
     def extend(self, iterable):
         length = len(self)
-        append_list = list(filterfalse(self._map.__contains__, iterable))   # dedup
+        append_list = list(filterfalse(self._map.__contains__, iterable))  # dedup
         self._map.update(zip(append_list, range(length, length + len(append_list))))
         super().extend(append_list)
 
@@ -268,3 +228,28 @@ class DedupList(list):
     def clear(self):
         self._map.clear()
         super().clear()
+
+
+def int_to_human_readable(i: int) -> str:
+    warnings.warn(
+        "Since FeelUOwn 5.1, it's recommended to use "
+        "feeluown.i18n.human_readable_number for L10N support.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return human_readable_number(n=i)
+
+
+def detect_proxy() -> dict:
+    """
+    Detect system proxy settings.
+
+    :return: Dict of proxies read from system, or empty dict if no proxy detected.
+    """
+    try:
+        proxies = urllib.request.getproxies()
+    except Exception:
+        proxies = {}
+    # getproxies may include a 'no' key from NO_PROXY; it is not a real proxy.
+    proxies.pop("no", None)
+    return proxies

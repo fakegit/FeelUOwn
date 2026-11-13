@@ -1,7 +1,18 @@
 from enum import Enum
 
-from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtWidgets import QTabBar, QWidget, QRadioButton, QHBoxLayout
+from PyQt6.QtCore import pyqtSignal, QSize
+from PyQt6.QtWidgets import (
+    QTabBar,
+    QWidget,
+    QRadioButton,
+    QHBoxLayout,
+    QStyle,
+    QProxyStyle,
+)
+from PyQt6.QtGui import QPalette
+
+from feeluown.i18n import t
+from feeluown.gui.helpers import resize_font
 
 
 def mode(func):
@@ -14,6 +25,7 @@ def mode(func):
         this.contributed_btn.hide()
         this.videos_btn.hide()
         func(this)
+
     return wrapper
 
 
@@ -27,6 +39,57 @@ class Tab(Enum):
     desc = 8
 
     contributed = 16
+
+
+class TabBarStyle(QProxyStyle):
+    def drawControl(self, element, option, painter, widget):
+        if element == QStyle.ControlElement.CE_TabBarTabShape:
+            # https://code.woboq.org/qt5/qtbase/src/plugins/styles/mac/qmacstyle_mac.mm.html#613
+            # On macOS, there will be seperate line between tabs, which looks bad.
+            # So we paint the tab shape by ourselves.
+            painter.save()
+            rect = option.rect
+            is_selected = option.state & QStyle.StateFlag.State_Selected
+            color = widget.palette().color(QPalette.ColorRole.Base)
+            if is_selected:
+                color.setAlpha(160)
+                painter.fillRect(rect, color)
+            else:
+                color.setAlpha(80)
+                painter.fillRect(rect, color)
+            painter.restore()
+        elif element == QStyle.ControlElement.CE_TabBarTabLabel:
+            # HELP: Changing font size in QTabBar does not work, so we
+            # resize font size here.
+            painter.save()
+            font = painter.font()
+            resize_font(font, 2)
+            font.setBold(True)
+            painter.setFont(font)
+            super().drawControl(element, option, painter, widget)
+            painter.restore()
+        else:
+            super().drawControl(element, option, painter, widget)
+
+
+class TabBar(QTabBar):
+    def __init__(self, parent=None):
+        super().__init__(parent=parent)
+
+        self._height = 32
+        self.setFixedHeight(self._height)
+
+        self.setDocumentMode(True)
+        self.setDrawBase(False)
+        # HELP(cosven): It seems that the widget size policy is changed
+        # if setStyle is called. See tabSizeHint comment for more info.
+        self.setStyle(TabBarStyle())
+
+    def tabSizeHint(self, index):
+        # NOTE(cosven): On macOS, the width of default sizeHint is too large.
+        # We set the width to 0 and the widget can calculate a proper width
+        # for it. I don't know if this works well on other platforms.
+        return QSize(0, self._height)
 
 
 class TableTabBarV2(QWidget):
@@ -46,13 +109,13 @@ class TableTabBarV2(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent=parent)
 
-        self.songs_btn = QRadioButton('歌曲', self)
-        self.albums_btn = QRadioButton('专辑', self)
-        self.artists_btn = QRadioButton('歌手', self)
-        self.playlists_btn = QRadioButton('歌单', self)
-        self.videos_btn = QRadioButton('视频', self)
-        self.desc_btn = QRadioButton('简介', self)
-        self.contributed_btn = QRadioButton('参与作品', self)
+        self.songs_btn = QRadioButton(t("track"), self)
+        self.albums_btn = QRadioButton(t("album"), self)
+        self.artists_btn = QRadioButton(t("musician"), self)
+        self.playlists_btn = QRadioButton(t("track-list"), self)
+        self.videos_btn = QRadioButton(t("video"), self)
+        self.desc_btn = QRadioButton(t("description"), self)
+        self.contributed_btn = QRadioButton(t("track-contributed-albums"), self)
         self._layout = QHBoxLayout(self)
 
         self.songs_btn.clicked.connect(self.show_songs_needed.emit)
@@ -78,6 +141,14 @@ class TableTabBarV2(QWidget):
 
     def check_default(self):
         self.songs_btn.setChecked(True)
+
+    def restore_default(self):
+        self.songs_btn.setText(t("track"))
+        self.albums_btn.setText(t("album"))
+        self.artists_btn.setText(t("musician"))
+        self.playlists_btn.setText(t("track-list"))
+        self.videos_btn.setText(t("video"))
+        self.check_default()
 
     def check(self, tab):
         self._tab_btn_mapping[tab].setChecked(True)
@@ -115,10 +186,10 @@ class TableTabBarV2(QWidget):
 
 
 class TableTabBar(QTabBar):
-    song = '歌曲'
-    artist = '歌手'
-    album = '专辑'
-    contributed_albums = '参与作品'
+    song = t("track")
+    artist = t("musician")
+    album = t("album")
+    contributed_albums = t("track-contributed-albums")
 
     show_songs_needed = pyqtSignal()
     show_artists_needed = pyqtSignal()
@@ -131,7 +202,7 @@ class TableTabBar(QTabBar):
         self.tabBarClicked.connect(self.on_index_changed)
         self.setExpanding(False)
         # self.setDrawBase(False)
-        self.setShape(QTabBar.TriangularNorth)
+        self.setShape(QTabBar.Shape.TriangularNorth)
 
     def use(self, *tabs):
         i = self.count() - 1
@@ -142,15 +213,15 @@ class TableTabBar(QTabBar):
             self.addTab(tab)
 
     def artist_mode(self):
-        self.use(TableTabBar.song,
-                 TableTabBar.album,
-                 TableTabBar.contributed_albums)
+        self.use(TableTabBar.song, TableTabBar.album, TableTabBar.contributed_albums)
 
     def library_mode(self):
-        self.use(TableTabBar.song,
-                 TableTabBar.artist,
-                 TableTabBar.album,
-                 TableTabBar.contributed_albums)
+        self.use(
+            TableTabBar.song,
+            TableTabBar.artist,
+            TableTabBar.album,
+            TableTabBar.contributed_albums,
+        )
 
     def on_index_changed(self, index):
         text = self.tabText(index)

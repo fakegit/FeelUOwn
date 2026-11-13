@@ -1,8 +1,6 @@
 import logging
-import requests
 
 from feeluown.utils.dispatch import Signal
-from requests.exceptions import ConnectionError, HTTPError, Timeout
 
 
 logger = logging.getLogger(__name__)
@@ -16,7 +14,10 @@ class Request:
         self.server_error_signal = Signal()
 
     def get(self, *args, **kw):
-        logger.info('request.get %s %s' % (args, kw))
+        import requests
+        from requests.exceptions import ConnectionError, HTTPError, Timeout
+
+        logger.debug('request.get %s %s' % (args, kw))
         if kw.get('timeout') is None:
             kw['timeout'] = 1
         try:
@@ -32,7 +33,10 @@ class Request:
         return None
 
     def post(self, *args, **kw):
-        logger.info('request.post %s %s' % (args, kw))
+        import requests
+        from requests.exceptions import ConnectionError, HTTPError, Timeout
+
+        logger.debug('request.post %s %s' % (args, kw))
         try:
             res = requests.post(*args, **kw)
             return res

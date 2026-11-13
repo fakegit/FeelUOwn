@@ -44,7 +44,7 @@ class PreemptiveTaskSpec:
             self._mgr.loop.call_soon_threadsafe(self._task.cancel)
         self._task = None
 
-    def bind_coro(self, coro):
+    def bind_coro(self, coro) -> asyncio.Task:
         """run the coroutine and bind the task
 
         it will cancel the previous task if exists
@@ -60,7 +60,7 @@ class PreemptiveTaskSpec:
             self._task.add_done_callback(self._cb)
         return self._task
 
-    def bind_blocking_io(self, func, *args):
+    def bind_blocking_io(self, func, *args) -> asyncio.Task:
         """run blocking io func in a thread executor, and bind the task
 
         it will cancel the previous task if exists
@@ -79,8 +79,10 @@ class PreemptiveTaskSpec:
     def _cb(self, future):
         try:
             future.result()
+        except asyncio.CancelledError:
+            logger.warning(f'Task {self.name} is cancelled')
         except Exception as e:  # noqa
-            logger.warn(f'Task {self.name} failed: {e}')
+            logger.exception(f'Task {self.name} failed')
 
 
 class TaskManager:
@@ -96,16 +98,9 @@ class TaskManager:
         task_spec = task_mgr.get_or_create(task_name, TaskType.preemptive)
         task = task_spec.bind_coro(fetch_song())
     """
-    def __init__(self, app, loop):
-        """
-
-        :param app: feeluown app instance
-        :param loop: asyncio event loop
-        """
-        self._app = app
-
+    def __init__(self, *_):
         # only accessible for task instance
-        self.loop = loop
+        self.loop = asyncio.get_running_loop()
 
         # store the name:taskspec mapping
         self._store = {}
@@ -129,3 +124,22 @@ class TaskManager:
         task_spec = PreemptiveTaskSpec(self, name)
         self._store[name] = task_spec
         return task_spec
+
+    def run_afn_preemptive(self, afn, *args, name=''):
+        if not name:
+            name = get_fn_name(afn)
+        task_spec = self.get_or_create(name)
+        return task_spec.bind_coro(afn(*args))
+
+    def run_fn_preemptive(self, fn, *args, name=''):
+        if not name:
+            name = get_fn_name(fn)
+        task_spec = self.get_or_create(name)
+        return task_spec.bind_blocking_io(fn, *args)
+
+
+def get_fn_name(fn):
+    if hasattr(fn, '__self__') and hasattr(fn, '__func__'):
+        this = fn.__self__
+        return f'{this.__module__}.{this.__class__.__name__}.{fn.__name__}'
+    return f'{fn.__module__}.{fn.__name__}'

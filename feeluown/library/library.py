@@ -1,131 +1,164 @@
+# mypy: disable-error-code=type-abstract
 import logging
-from functools import partial, lru_cache
-from typing import List, cast
+import warnings
+from collections import Counter
+from dataclasses import dataclass
+from typing import Callable, Optional, TypeVar, List, TYPE_CHECKING
 
-from feeluown.utils import aio
+from feeluown.media import Media, MediaType
+from feeluown.utils.aio import run_fn, as_completed
 from feeluown.utils.dispatch import Signal
-from feeluown.media import Media
-from feeluown.models import SearchType, ModelType
-from feeluown.utils.utils import log_exectime
-from .provider import AbstractProvider
-from .provider_v2 import ProviderV2
-from .excs import (
-    NotSupported, MediaNotFound, NoUserLoggedIn, ProviderAlreadyExists,
-    ProviderNotFound,
+from feeluown.library.base import SearchType, ModelType
+from feeluown.library.provider import Provider
+from feeluown.library.excs import (
+    MediaNotFound,
+    ProviderAlreadyExists,
+    ModelNotFound,
+    ResourceNotFound,
 )
-from .flags import Flags as PF
-from .models import (
-    ModelFlags as MF, BaseModel, BriefSongModel, SongModel, UserModel,
+from feeluown.library.flags import Flags as PF
+from feeluown.library.models import (
+    ModelFlags as MF,
+    BaseModel,
+    SimpleSearchResult,
+    BriefVideoModel,
+    BriefSongModel,
+    SongModel,
+    LyricModel,
+    VideoModel,
+    BriefAlbumModel,
+    BriefArtistModel,
+    AlbumModel,
 )
-from .model_protocol import (
-    ModelProtocol, BriefSongProtocol, SongProtocol, UserProtocol,
+from feeluown.library.model_state import ModelState
+from feeluown.library.provider_protocol import (
+    check_flag as check_flag_impl,
+    SupportsSongLyric,
+    SupportsSongMV,
+    SupportsSongMultiQuality,
+    SupportsVideoMultiQuality,
+    SupportsSongWebUrl,
+    SupportsVideoWebUrl,
+    SupportsAlbumSongsReader,
+    SupportsUserAutoLogin,
+    SupportsImgUrlToMedia,
+)
+from feeluown.library.standby import (
+    get_standby_score,
+    STANDBY_DEFAULT_MIN_SCORE,
+    STANDBY_FULL_SCORE,
 )
 
+if TYPE_CHECKING:
+    from feeluown.ai import AI
+    from feeluown.library.ytdl import Ytdl
 
 logger = logging.getLogger(__name__)
 
-
-def _sort_song_standby(song, standby_list):
-    """sort song standby list by similarity"""
-
-    def get_score(standby):
-        """
-        score strategy
-
-        1. title + album > artist
-        2. artist > title > album
-        """
-
-        score = 10
-        if song.artists_name_display != standby.artists_name_display:
-            score -= 4
-        if song.title_display != standby.title_display:
-            score -= 3
-        if song.album_name_display != standby.album_name_display:
-            score -= 2
-        return score
-
-    sorted_standby_list = sorted(
-        standby_list,
-        key=lambda standby: get_score(standby),
-        reverse=True
-    )
-
-    return sorted_standby_list
+T_p = TypeVar("T_p")
 
 
-def _extract_and_sort_song_standby_list(song, result_g):
-    standby_list = []
-    for result in result_g:
-        for standby in result.songs[:2]:
-            standby_list.append(standby)
-    sorted_standby_list = _sort_song_standby(song, standby_list)
-    return sorted_standby_list
+@dataclass
+class SongStandbyOptions:
+    """Options for listing standby songs.
 
-
-def _get_display_property_or_raise(model, attr):
-    """Get property with no IO operation
-
-    I hope we need not use this function in other module because
-    it is tightly coupled with display_property.
+    :param source_in: Provider identifiers to search. Search providers configured
+        for standby lookup when it is None.
+    :param score_fn: Function used to score whether a candidate is the same song.
+        Defaults to :func:`get_standby_score`.
+    :param min_score: Minimum score required for a candidate to be returned.
+    :param limit_per_source: Maximum number of candidates returned for each
+        provider. Values smaller than 1 are treated as 1.
+    :param single_full_score_per_source: If enabled, once a provider yields a
+        candidate with ``STANDBY_FULL_SCORE``, only that candidate is returned
+        for the provider. Earlier lower-score candidates from the same provider
+        are discarded, and later candidates from that provider are ignored.
     """
-    return getattr(model, f'_display_store_{attr}')
+
+    source_in: Optional[List[str]] = None
+    score_fn: Optional[Callable[[BriefSongModel, BriefSongModel], float]] = None
+    min_score: float = STANDBY_DEFAULT_MIN_SCORE
+    limit_per_source: int = 1
+    single_full_score_per_source: bool = False
+
+
+def raise_(e):
+    raise e
 
 
 class Library:
-    """音乐库，管理资源提供方以及资源"""
+    """Resource entrypoints."""
 
-    def __init__(self, providers_standby=None):
+    def __init__(self, providers_standby=None, enable_ai_standby_matcher=True):
         """
 
         :type app: feeluown.app.App
         """
         self._providers_standby = providers_standby
         self._providers = set()
+        self.ytdl: Optional["Ytdl"] = None
+        self.ai: Optional["AI"] = None
 
         self.provider_added = Signal()  # emit(AbstractProvider)
         self.provider_removed = Signal()  # emit(AbstractProvider)
+        # TODO: implement this feature
+        self.enable_ai_standby_matcher = enable_ai_standby_matcher
+
+    def set_providers_standby(self, providers_standby):
+        """Set the standby provider list at runtime.
+
+        :param providers_standby: ``None`` means all providers,
+            ``[]`` means disabled, and a list means specific providers.
+        """
+        self._providers_standby = providers_standby
+
+    def setup_ytdl(self, *args, **kwargs):
+        from .ytdl import Ytdl
+
+        self.ytdl = Ytdl(*args, **kwargs)
+
+    def setup_ai(self, ai):
+        self.ai = ai
 
     def register(self, provider):
         """register provider
 
         :raises ProviderAlreadyExists:
         :raises ValueError:
-
-        >>> from feeluown.library import dummy_provider
-        >>> library = Library(None)
-        >>> library.register(dummy_provider)
-        >>> library.register(dummy_provider)
-        Traceback (most recent call last):
-            ...
-        feeluown.library.ProviderAlreadyExists
         """
-        if not isinstance(provider, AbstractProvider):
-            raise ValueError('invalid provider instance')
+        if not isinstance(provider, Provider):
+            raise ValueError("invalid provider instance")
         for _provider in self._providers:
             if _provider.identifier == provider.identifier:
                 raise ProviderAlreadyExists
         self._providers.add(provider)
         self.provider_added.emit(provider)
 
-    def deregister(self, provider):
-        """deregister provider"""
-        try:
-            self._providers.remove(provider)
-        except ValueError:
-            raise ProviderNotFound from None
-        else:
-            self.provider_removed.emit(provider)
+        if isinstance(provider, SupportsUserAutoLogin):
+            logger.debug(f"Auto login for {provider.identifier} ...")
+            run_fn(provider.auto_login)
 
-    def get(self, identifier):
-        """通过资源提供方唯一标识获取提供方实例"""
+    def deregister(self, provider) -> bool:
+        """deregister provider
+
+        .. versionchanged:: 4.0
+           Do not raise exception anymore, return False instead.
+        """
+        if provider in self._providers:
+            self._providers.remove(provider)
+            self.provider_removed.emit(provider)
+            return True
+        return False
+
+    def get(self, identifier) -> Optional[Provider]:
+        """Obtain the provider instance by the resource provider’s unique identifier."""
         for provider in self._providers:
             if provider.identifier == identifier:
                 return provider
         return None
 
-    def list(self):
-        """列出所有资源提供方"""
+    def list(self) -> List[Provider]:
+        """List all resource providers."""
         return list(self._providers)
 
     def _filter(self, identifier_in=None):
@@ -150,114 +183,257 @@ class Library:
                 try:
                     result = provider.search(keyword=keyword, type_=type_, **kwargs)
                 except Exception:  # pylint: disable=broad-except
-                    logger.exception('Search %s in %s failed.', keyword, provider)
+                    logger.exception("Search %s in %s failed.", keyword, provider)
                 else:
                     if result is not None:
                         yield result
 
-    async def a_search(self, keyword, source_in=None, timeout=None,
-                       type_in=None,
-                       **kwargs):
+    async def a_search(
+        self, keyword, source_in=None, timeout=None, type_in=None, return_err=False, **_
+    ):
         """async version of search
+
+        .. versionchanged:: 4.1.9
+            Add `return_err` parameter.
 
         TODO: add Happy Eyeballs requesting strategy if needed
         """
         type_in = SearchType.batch_parse(type_in) if type_in else [SearchType.so]
 
+        # Wrap the search function to associate the result with source.
+        def wrap_search(pvd, kw, t):
+            def search():
+                try:
+                    res = pvd.search(kw, type_=t)
+                except Exception as e:  # noqa
+                    if return_err:
+                        logger.exception("One provider search failed")
+                        return SimpleSearchResult(
+                            q=keyword,
+                            source=pvd.identifier,  # noqa
+                            err_msg=f"{type(e)}",
+                        )
+                    raise e
+                # When a provider does not implement search method, it returns None.
+                if res is not None and (
+                    res.songs
+                    or res.albums
+                    or res.artists
+                    or res.videos
+                    or res.playlists
+                ):
+                    return res
+                # Pass empty err_msg, otherwise `track-search-result-empty`
+                # can be ignored.
+                return SimpleSearchResult(q=keyword, source=pvd.identifier, err_msg="")
+
+            return search
+
         fs = []  # future list
         for provider in self._filter(identifier_in=source_in):
             for type_ in type_in:
-                future = aio.run_in_executor(
-                    None,
-                    partial(provider.search, keyword, type_=type_))
+                future = run_fn(wrap_search(provider, keyword, type_))
                 fs.append(future)
-
-        for future in aio.as_completed(fs, timeout=timeout):
+        for task_ in as_completed(fs, timeout=timeout):
             try:
-                result = await future
-            except:  # noqa
-                logger.exception('search task failed')
-                continue
+                result = await task_
+            except Exception as e:  # noqa
+                logger.exception("One search task failed due to asyncio")
             else:
                 yield result
 
-    @log_exectime
-    def list_song_standby(self, song, onlyone=True):
-        """try to list all valid standby
+    async def a_song_prepare_media_no_exc(self, standby, policy):
+        media = None
+        try:
+            media = await run_fn(self.song_prepare_media, standby, policy)
+        except MediaNotFound as e:
+            logger.debug(f"standby media not found: {e}")
+        except:  # noqa
+            logger.exception(f"get standby:{standby} media failed")
+        return media
 
-        Search a song in all providers. The typical usage scenario is when a
-        song is not available in one provider, we can try to acquire it from other
-        providers.
+    async def a_list_song_standby_v3(
+        self,
+        song,
+        options=None,
+    ) -> List[BriefSongModel]:
+        """List song standbys without preparing media."""
+        if options is None:
+            options = SongStandbyOptions()
 
-        FIXME: this method will send several network requests,
-        which may block the caller.
+        q = "{} {}".format(song.title_display, song.artists_name_display)
+        if not q.strip():
+            return []
 
-        :param song: song model
-        :param onlyone: return only one element in result
-        :return: list of songs (maximum count: 2)
-        """
-        valid_sources = [pvd.identifier for pvd in self.list()
-                         if pvd.identifier != song.source]
-        q = '{} {}'.format(song.title, song.artists_name)
-        result_g = self.search(q, source_in=valid_sources)
-        sorted_standby_list = _extract_and_sort_song_standby_list(song, result_g)
-        # choose one or two valid standby
-        result = []
-        for standby in sorted_standby_list:
-            if standby.url:  # this may trigger network request
-                result.append(standby)
-                if onlyone or len(result) >= 2:
-                    break
-        return result
+        if options.source_in is not None:
+            pvd_ids = self._get_registered_provider_ids(options.source_in)
+            return await self._a_list_song_standby_v3_from_sources(
+                song, q, pvd_ids, options
+            )
 
-    async def a_list_song_standby(self, song, onlyone=True, source_in=None):
-        """async version of list_song_standby
+        standby_pvd_ids = self._get_registered_provider_ids(self._providers_standby)
+        if standby_pvd_ids:
+            standbys = await self._a_list_song_standby_v3_from_sources(
+                song, q, standby_pvd_ids, options
+            )
+            if standbys:
+                return standbys
 
-        .. versionadded:: 3.7.5
-             The *source_in* paramter.
+        standby_pvd_id_set = set(standby_pvd_ids)
+        other_pvd_ids = [
+            pvd.identifier
+            for pvd in self.list()
+            if pvd.identifier not in standby_pvd_id_set
+        ]
+        return await self._a_list_song_standby_v3_from_sources(
+            song, q, other_pvd_ids, options
+        )
+
+    def _get_registered_provider_ids(self, source_in):
+        if not source_in:
+            return []
+        registered_provider_ids = {pvd.identifier for pvd in self.list()}
+        return [
+            source
+            for source in dict.fromkeys(source_in)
+            if source in registered_provider_ids
+        ]
+
+    async def _a_list_song_standby_v3_from_sources(
+        self,
+        song,
+        query,
+        source_in,
+        options,
+    ) -> List[BriefSongModel]:
+        if not source_in:
+            return []
+
+        score_fn = options.score_fn or get_standby_score
+        limit_per_source = max(options.limit_per_source, 1)
+
+        scored_standbys = []
+        standby_counter = Counter()
+        full_score_sources = set()
+        async for result in self.a_search(query, source_in=source_in):
+            if result is None:
+                continue
+            for standby in result.songs:
+                source = standby.source
+                if source in full_score_sources:
+                    continue
+                if (
+                    standby_counter[source] >= limit_per_source
+                    and not options.single_full_score_per_source
+                ):
+                    continue
+                score = score_fn(song, standby)
+                if (
+                    options.single_full_score_per_source
+                    and score == STANDBY_FULL_SCORE
+                ):
+                    scored_standbys = [
+                        (s, s_score)
+                        for s, s_score in scored_standbys
+                        if s.source != source
+                    ]
+                    scored_standbys.append((standby, score))
+                    standby_counter[source] = 1
+                    full_score_sources.add(source)
+                    continue
+                if standby_counter[source] >= limit_per_source:
+                    continue
+                if score >= options.min_score:
+                    scored_standbys.append((standby, score))
+                    standby_counter[source] += 1
+
+        scored_standbys.sort(key=lambda item: item[1], reverse=True)
+        return [standby for standby, _ in scored_standbys]
+
+    async def a_list_song_standby_v2(
+        self,
+        song,
+        audio_select_policy=">>>",
+        source_in=None,
+        score_fn=None,
+        min_score=STANDBY_DEFAULT_MIN_SCORE,
+        limit=1,
+    ):
+        """list song standbys and their media
+
+        .. versionadded:: 3.7.8
         """
         if source_in is None:
-            pvd_ids = self._providers_standby or [pvd.identifier for pvd in self.list()]
+            if self._providers_standby is None:
+                pvd_ids = [pvd.identifier for pvd in self.list()]
+            else:
+                pvd_ids = self._providers_standby
         else:
             pvd_ids = [pvd.identifier for pvd in self._filter(identifier_in=source_in)]
-        # FIXME(cosven): the model return from netease is new model,
-        # and it does not has url attribute
-        valid_providers = [pvd_id for pvd_id in pvd_ids
-                           if pvd_id != song.source and pvd_id != 'netease']
-        q = '{} {}'.format(song.title_display, song.artists_name_display)
-        result_g = []
-        async for result in self.a_search(q, source_in=valid_providers):
-            if result is not None:
-                result_g.append(result)
-        sorted_standby_list = _extract_and_sort_song_standby_list(song, result_g)
-        # choose one or two valid standby
-        result = []
-        for standby in sorted_standby_list:
-            try:
-                url = await aio.run_in_executor(None, lambda: standby.url)
-            except:  # noqa
-                logger.exception('get standby url failed')
-            else:
-                if url:
-                    result.append(standby)
-                    if onlyone or len(result) >= 2:
-                        break
-        return result
+        if score_fn is None:
+            score_fn = get_standby_score
+        limit = max(limit, 1)
 
-    #
-    # methods for v2
-    #
+        q = "{} {}".format(song.title_display, song.artists_name_display)
+        standby_score_list = []  # [(standby, score), (standby, score)]
+        song_media_list = []  # [(standby, media), (standby, media)]
+        top2_standby = []
+        async for result in self.a_search(q, source_in=pvd_ids):
+            if result is None:
+                continue
+            # Only check the first 3 songs
+            for i, standby in enumerate(result.songs):
+                # HACK(cosven): I think the local provider should not be included,
+                #   because the search algorithm of local provider is so bad.
+                if i < 2 and standby.source != "local":
+                    top2_standby.append(standby)
+                score = score_fn(song, standby)
+                if score == STANDBY_FULL_SCORE:
+                    media = await self.a_song_prepare_media_no_exc(
+                        standby, audio_select_policy
+                    )
+                    if media is None:
+                        continue
+                    logger.info(f"Find full score standby for song:{q}")
+                    song_media_list.append((standby, media))
+                    if len(song_media_list) >= limit:
+                        # Return as early as possible to get better performance
+                        return song_media_list
+                elif score >= min_score:
+                    standby_score_list.append((standby, score))
+        if standby_score_list:
+            standby_pvd_id_set = {standby.source for standby, _ in standby_score_list}
+            logger.info(
+                f"Find {len(standby_score_list)} similar songs "
+                f"from {','.join(standby_pvd_id_set)}. Try to get a valid media"
+            )
+            max_per_source = 2
+            standby_score_list_2 = []
+            counter = Counter()
+            for s, score in standby_score_list:
+                if counter[s.source] >= max_per_source:
+                    continue
+                counter[s.source] += 1
+                standby_score_list_2.append((s, score))
 
-    # provider common
-
-    def get_or_raise(self, identifier) -> ProviderV2:
-        """
-        :raises ProviderNotFound:
-        """
-        provider = self.get(identifier)
-        if provider is None:
-            raise ProviderNotFound(f'provider {identifier} not found')
-        return provider
+            assert len(standby_score_list_2) <= max_per_source * len(standby_pvd_id_set)
+            sorted_standby_score_list = sorted(
+                standby_score_list_2,
+                key=lambda song_score: song_score[1],
+                reverse=True,
+            )
+            for standby, _ in sorted_standby_score_list:
+                # TODO: send multiple requests at a time.
+                media = await self.a_song_prepare_media_no_exc(
+                    standby, audio_select_policy
+                )
+                if media is not None:
+                    song_media_list.append((standby, media))
+                    if len(song_media_list) >= limit:
+                        return song_media_list
+            if song_media_list:
+                return song_media_list
+        return song_media_list
 
     def check_flags(self, source: str, model_type: ModelType, flags: PF) -> bool:
         """Check if a provider satisfies the specific ability for a model type
@@ -272,152 +448,247 @@ class Library:
         provider = self.get(source)
         if provider is None:
             return False
-        if isinstance(provider, ProviderV2):
-            return provider.check_flags(model_type, flags)
-        return False
 
-    def check_flags_by_model(self, model: ModelProtocol, flags: PF) -> bool:
+        # Check each flag.
+        for value in PF.__members__.values():
+            if value in PF(flags):
+                if check_flag_impl(provider, model_type, flags) is False:
+                    return False
+        return True
+
+    def check_flags_by_model(self, model: BaseModel, flags: PF) -> bool:
         """Alias for check_flags"""
-        return self.check_flags(model.source,
-                                ModelType(model.meta.model_type),
-                                flags)
-
-    # ---------------------------
-    # Methods for backward compat
-    # ---------------------------
-    def cast_model_to_v1(self, model):
-        """Cast a v1/v2 model to v1
-
-        During the model migration from v1 to v2, v2 may lack some ability.
-        Cast the model to v1 to acquire such ability.
-        """
-        if isinstance(model, BaseModel) and (model.meta.flags & MF.v2):
-            return self._cast_model_to_v1_impl(model)
-        return model
-
-    @lru_cache(maxsize=1024)
-    def _cast_model_to_v1_impl(self, model):
-        provider = self.get_or_raise(model.source)
-        ModelCls = provider.get_model_cls(model.meta.model_type)
-        return ModelCls.create_by_display(identifier=model.identifier)
+        warnings.warn("please use isinstance(provider, protocol_cls)")
+        return self.check_flags(model.source, ModelType(model.meta.model_type), flags)
 
     # -----
     # Songs
     # -----
-    def song_upgrade(self, song: BriefSongProtocol) -> SongProtocol:
-        if song.meta.flags & MF.v2:
-            if MF.normal in song.meta.flags:
-                upgraded_song = cast(SongProtocol, song)
-            else:
-                provider = self.get_or_raise(song.source)
-                if self.check_flags_by_model(song, PF.get):
-                    upgraded_song = provider.song_get(song.identifier)
-                else:
-                    raise NotSupported("provider has not flag 'get' for 'song'")
-        else:
-            fields = [f for f in list(SongModel.__fields__)
-                      if f not in list(BaseModel.__fields__)]
-            for field in fields:
-                getattr(song, field)
-            upgraded_song = cast(SongProtocol, song)
-        return upgraded_song
+    def song_upgrade(self, song: BriefSongModel) -> SongModel:
+        return self._model_upgrade(song)  # type: ignore
 
-    def song_list_similar(self, song: BriefSongProtocol) -> List[BriefSongProtocol]:
-        provider = self.get_or_raise(song.source)
-        return provider.song_list_similar(song)
-
-    def song_list_hot_comments(self, song: BriefSongProtocol):
-        provider = self.get_or_raise(song.source)
-        return provider.song_list_hot_comments(song)
-
-    def song_prepare_media(self, song: BriefSongProtocol, policy) -> Media:
+    def song_prepare_media(self, song: BriefSongModel, policy) -> Media:
         provider = self.get(song.source)
         if provider is None:
-            raise MediaNotFound(f'provider:{song.source} not found')
-        if song.meta.flags & MF.v2:
-            # provider MUST has multi_quality flag for song
-            assert self.check_flags_by_model(song, PF.multi_quality)
-            media, _ = provider.song_select_media(song, policy)
-        else:
-            if song.meta.support_multi_quality:
-                media, _ = song.select_media(policy)  # type: ignore
-            else:
-                url = song.url  # type: ignore
-                if url:
-                    media = Media(url)
+            raise MediaNotFound(f"provider({song.source}) not found")
+        media = None
+        if isinstance(provider, SupportsSongMultiQuality):
+            try:
+                media, _ = provider.song_select_media(song, policy)
+            except MediaNotFound as e:
+                if e.reason is MediaNotFound.Reason.check_children:
+                    raise
                 else:
-                    raise MediaNotFound
+                    media = None
         if not media:
-            raise MediaNotFound
+            if self.ytdl is not None and isinstance(provider, SupportsSongWebUrl):
+                song_web_url = provider.song_get_web_url(song)
+                media = self.ytdl.select_audio(song_web_url, policy, source=song.source)
+                found = media is not None
+                logger.debug(
+                    f"ytdl select audio for {song_web_url} finished, found: {found}"
+                )
+            if not media:
+                raise MediaNotFound("provider returns empty media")
         return media
 
-    def song_prepare_mv_media(self, song: BriefSongProtocol, policy) -> Media:
+    def song_get_web_url(self, song: BriefSongModel) -> str:
+        """Get song web url
+
+        :raises ResourceNotFound: provider/song/web_url is not found
+        :raises ProviderIOError: provider raises error during get_web_url
+
+        .. versionadded:: 4.1.8
+        """
+        provider = self.get(song.source)
+        if provider is None:
+            raise ResourceNotFound(f"provider({song.source}) not found")
+        if isinstance(provider, SupportsSongWebUrl):
+            return provider.song_get_web_url(song)
+        raise ResourceNotFound(reason=ResourceNotFound.Reason.not_supported)
+
+    def song_prepare_mv_media(self, song: BriefSongModel, policy) -> Media:
         """
 
         .. versionadded:: 3.7.5
         """
+        mv = self.song_get_mv(song)
+        if mv is not None:
+            media = self.video_prepare_media(mv, policy)
+            return media
+        raise MediaNotFound("provider returns empty media")
+
+    def song_get_mv(self, song: BriefSongModel) -> Optional[VideoModel]:
+        """Get the MV model of a song."""
         provider = self.get(song.source)
-        if provider is None:
-            raise MediaNotFound(f'provider:{song.source} not found')
-        song_v1 = self.cast_model_to_v1(song)
-        mv = song_v1.mv
-        if mv.meta.support_multi_quality:
-            media, _ = mv.select_media(policy)
+        if isinstance(provider, SupportsSongMV):
+            return provider.song_get_mv(song)
+        return None
+
+    def song_get_lyric(self, song: BriefSongModel) -> Optional[LyricModel]:
+        """Get the lyric model of a song.
+
+        Return None when lyric does not exist instead of raising exceptions,
+        because it is predictable.
+        """
+        provider = self.get(song.source)
+        if isinstance(provider, SupportsSongLyric):
+            return provider.song_get_lyric(song)
+        return None
+
+    # --------
+    # Album
+    # --------
+    def album_upgrade(self, album: BriefAlbumModel):
+        return self._model_upgrade(album)
+
+    def album_list_songs(self, album: BriefAlbumModel):
+        """
+        :raises ResourceNotFound:
+        :raises ProviderIOError:
+
+        .. versionadded:: 4.1.11
+        """
+        if not isinstance(album, AlbumModel):
+            ualbum = self.album_upgrade(album)
         else:
-            media = mv.media
-            if media:
-                media = Media(media)
+            ualbum = album
+        if ualbum.song_count == 0:
+            return []
+        if ualbum.songs:
+            return ualbum.songs
+        provider = self.get(ualbum.source)
+        if isinstance(provider, SupportsAlbumSongsReader):
+            return list(provider.album_create_songs_rd(ualbum))
+        raise ResourceNotFound(reason=ResourceNotFound.Reason.not_supported)
+
+    # --------
+    # Artist
+    # --------
+    def artist_upgrade(self, artist: BriefArtistModel):
+        return self._model_upgrade(artist)
+
+    # --------
+    # Playlist
+    # --------
+
+    def playlist_upgrade(self, playlist):
+        return self._model_upgrade(playlist)
+
+    # -------------------------
+    # generic methods for model
+    # -------------------------
+    def model_get(self, pid, mtype, mid):
+        """Get a (normal) model instance.
+
+        :param pid: provider id
+        :param mtype: model type
+        :param mid: model id
+        :return: model
+
+        :raise ResourceNotFound: model does not exist
+        """
+        provider = self.get(pid)
+        if provider is None:
+            raise ModelNotFound(f"provider:{pid} not found")
+        return provider.model_get(mtype, mid)
+
+    def model_get_cover(self, model):
+        """Get the cover url of model
+
+        :param model: model which has a 'cover' field.
+        :return: cover url if exists, else ''.
+        """
+        if MF.normal not in model.meta.flags:
+            try:
+                um = self._model_upgrade(model)
+            except ResourceNotFound:
+                return ""
+        else:
+            um = model
+        if ModelType(model.meta.model_type) is ModelType.artist:
+            cover = um.pic_url
+        elif ModelType(model.meta.model_type) is ModelType.song:
+            cover = um.pic_url
+            if not cover:
+                album = um.album
+                return self.model_get_cover(album)
+        else:
+            cover = um.cover
+        return cover
+
+    def model_get_cover_media(self, model) -> Optional[Media]:
+        """Get cover media and preserve provider-level network options."""
+        cover_url = self.model_get_cover(model)
+        if not cover_url:
+            return None
+        provider = self.get(model.source)
+        if isinstance(provider, SupportsImgUrlToMedia):
+            return provider.img_url_to_media(cover_url)
+        return Media(cover_url, MediaType.image)
+
+    def _model_upgrade(self, model):
+        """Upgrade a model to normal model.
+
+        :raises ModelNotFound: the model does not exist
+
+        Note you may catch ResourceNotFound exception to simplify your code.
+
+        .. versionchanged:: 3.8.11
+            Raise ModelNotFound if the model does not exist.
+            Before ModelCannotUpgrade was raised.
+        """
+        # Return model directly if it is already a normal(upgraded) model.
+        if MF.normal in model.meta.flags:
+            return model
+
+        model_type = ModelType(model.meta.model_type)
+        provider = self.get(model.source)
+        if provider is None:
+            raise ModelNotFound(f"provider:{model.source} not found")
+        try:
+            upgraded_model = provider.model_get(model_type, model.identifier)
+        except ModelNotFound as e:
+            if e.reason is ModelNotFound.Reason.not_found:
+                model.state = ModelState.not_exists
+            elif e.reason is ModelNotFound.Reason.not_supported:
+                model.state = ModelState.cant_upgrade
+            raise
+        if upgraded_model is None:  # some provider does not implement
+            raise ModelNotFound(f"{provider} implementation error, it returns None :(")
+        return upgraded_model
+
+    # --------
+    # Video
+    # --------
+    def video_upgrade(self, video):
+        return self._model_upgrade(video)
+
+    def video_prepare_media(self, video: BriefVideoModel, policy) -> Media:
+        """Prepare media for video.
+
+        :param video: either a v1 MvModel or a v2 (Brief)VideoModel.
+        """
+        provider = self.get(video.source)
+        try:
+            if isinstance(provider, SupportsVideoMultiQuality):
+                media, _ = provider.video_select_media(video, policy)
+                if not media:
+                    raise MediaNotFound("provider returns empty media")
+            else:
+                raise MediaNotFound("provider or video not found")
+        except MediaNotFound:
+            if self.ytdl is not None and isinstance(provider, SupportsVideoWebUrl):
+                video_web_url = provider.video_get_web_url(video)
+                media = self.ytdl.select_video(
+                    video_web_url, policy, source=video.source
+                )
+                found = media is not None
+                logger.debug(
+                    f"ytdl select video for {video_web_url} finished, found: {found}"
+                )
             else:
                 media = None
-        if not media:
-            raise MediaNotFound
+            if not media:
+                raise
         return media
-
-    def song_get_lyric(self, song: BriefSongModel):
-        pass
-
-    def song_get_mv(self, song: BriefSongModel):
-        pass
-
-    # --------
-    # Provider
-    # --------
-    def provider_has_current_user(self, source: str) -> bool:
-        """Check if a provider has a logged in user
-
-        No IO operation is triggered.
-
-        .. versionadded:: 3.7.6
-        """
-        provider = self.get_or_raise(source)
-        if self.check_flags(source, ModelType.none, PF.current_user):
-            return provider.has_current_user()
-
-        try:
-            user_v1 = getattr(provider, '_user')
-        except AttributeError:
-            logger.warn("We can't determine if the provider has a current user")
-            return False
-        else:
-            return user_v1 is not None
-
-    def provider_get_current_user(self, source: str) -> UserProtocol:
-        """Get provider current logged in user
-
-        :raises NotSupported:
-        :raises ProviderNotFound:
-        :raises NoUserLoggedIn:
-
-        .. versionadded:: 3.7.6
-        """
-        provider = self.get_or_raise(source)
-        if self.check_flags(source, ModelType.none, PF.current_user):
-            return provider.get_current_user()
-
-        user_v1 = getattr(provider, '_user', None)
-        if user_v1 is None:
-            raise NoUserLoggedIn
-        return UserModel(identifier=user_v1.identifier,
-                         source=source,
-                         name=user_v1.name_display,
-                         avatar_url='')

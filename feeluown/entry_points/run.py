@@ -1,58 +1,68 @@
-from feeluown.utils.patch import patch_janus
-patch_janus()
+import os
 
-try:
-    from feeluown.utils.patch import patch_qeventloop
-except ImportError:
-    # when qasync/quamash is not installed
-    # FIXME: should not catch the error at here
-    pass
-else:
-    patch_qeventloop()
-
-import socket  # noqa: E402
+os.environ.setdefault('QT_API', 'pyqt6')
+os.environ.setdefault('FEELUOWN_QT_API', 'pyqt6')
 
 # pylint: disable=wrong-import-position
-from .base import create_config, setup_argparse  # noqa: E402
-from .run_cli import run_cli  # noqa: E402
-from .run_app import run_once, run_forever  # noqa: E402
+from feeluown.argparser import create_cli_parser  # noqa: E402
+
+
+def _apply_startup_patches():
+    """Apply runtime patches deferred from import time.
+
+    Importing this module should stay cheap so that `--help`/`--version`
+    and CLI fast paths do not pay for janus/mutagen/pydantic/Qt imports.
+    """
+    # Import locally to avoid pulling heavy deps at module import time.
+    # pylint: disable=import-outside-toplevel
+    from feeluown.utils.patch import (
+        patch_janus,
+        patch_mutagen,
+        patch_pydantic,
+    )
+    patch_janus()
+    patch_mutagen()
+    patch_pydantic()
+
+    try:
+        from feeluown.utils.patch import patch_qeventloop
+        patch_qeventloop()
+    except ImportError:
+        # qasync/qt is not installed
+        # FIXME: should not catch the error at here
+        pass
 
 
 def run():
-    """feeluown entry point"""
+    """feeluown entry point.
+    """
 
-    args = setup_argparse().parse_args()
-    config = create_config()
+    args = create_cli_parser().parse_args()
 
-    # we are trying to run some commands
-    if args.cmd is not None:
-
+    if args.cmd is not None:  # Only need to run some commands.
         if args.cmd == 'genicon':
+            # genicon does not need runtime patches or daemon checks.
+            # NOTE: janus/mutagen/pydantic/qeventloop patches are
+            # intentionally skipped here: run_cli -> climain only forwards
+            # via socket / generate_icon and never touches Signal aio queues
+            # (Signal.setup_aio_support self-patches janus when needed).
+            # pylint: disable=import-outside-toplevel
+            from .run_cli import run_cli  # noqa: E402
             return run_cli(args)
 
-        # if daemon is started, we send commands to daemon directly
+        # If daemon is started, we send commands to daemon directly
         # we simple think the daemon is started as long as
-        # the port 23333 is in use
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # TODO: this may block for 2 second if port is not used on Windows
-        rv = sock.connect_ex(('127.0.0.1', 23333))
-        if rv == 0:  # port is in use
-            sock.close()
+        # the port 23333 is in use.
+        # TODO: allow specify port in command line args.
+        # NOTE: same as above, the daemon-client path needs no patches.
+        # pylint: disable=import-outside-toplevel
+        from feeluown.utils.utils import is_port_inuse  # noqa: E402
+        if is_port_inuse(23333):
+            from .run_cli import run_cli  # noqa: E402
             return run_cli(args)
 
-        # If daemon is not started, (some) commands can be meaningless,
-        # such as `status`, `toggle`, `next`, etc. However, some other
-        # commands can still be usefule. For instance, when people
-        # want to fetch a song's playable url or see the lyric of a song,
-        # they may run `fuo show fuo://xxx/songs/12345`. When people
-        # want to make an audition of some music, they run
-        # `fuo play fuo://xxx/songs/12345`. Under these circumstances,
-        # we should try to make feeluown work as they expected to.
-        # Currently, we have three such commands:
-        cmds = ('show', 'play', 'search')
-        if args.cmd in cmds:
-            return run_once(args, config)
+    _apply_startup_patches()
 
-        raise SystemExit("can't connect to fuo daemon.")
-
-    return run_forever(args, config)
+    # pylint: disable=import-outside-toplevel
+    from .run_app import run_app  # noqa: E402
+    return run_app(args)

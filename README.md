@@ -1,38 +1,53 @@
 ## FeelUOwn - feel your own
 
+[简体中文](README.md) | [English](README.en.md)
+
 [![Documentation Status](https://readthedocs.org/projects/feeluown/badge/?version=latest)](http://feeluown.readthedocs.org)
-[![Build Status](https://travis-ci.com/feeluown/FeelUOwn.svg?branch=master)](https://travis-ci.com/feeluown/FeelUOwn)
+[![Build Status](https://github.com/feeluown/feeluown/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/feeluown/FeelUOwn)
 [![Coverage Status](https://coveralls.io/repos/github/feeluown/FeelUOwn/badge.svg)](https://coveralls.io/github/feeluown/FeelUOwn)
 [![PyPI](https://img.shields.io/pypi/v/feeluown.svg)](https://pypi.python.org/pypi/feeluown)
-[![python](https://img.shields.io/pypi/pyversions/fuocore.svg)](https://pypi.python.org/pypi/feeluown)
+[![python](https://img.shields.io/pypi/pyversions/feeluown.svg)](https://pypi.python.org/pypi/feeluown)
 
-FeelUOwn 是一个符合 Unix 哲学的跨平台的音乐播放器～
+FeelUOwn 是一个稳定、用户友好以及高度可定制的音乐播放器。
 
-[![macOS 效果预览](https://user-images.githubusercontent.com/4962134/73344241-fa5e7280-42bc-11ea-95bf-28eac8180d0e.png)](https://www.bilibili.com/video/av46787694/)
+[![macOS 效果预览](https://github.com/user-attachments/assets/6d96c655-e35b-46d8-aaec-4d4dc202347f)](https://www.bilibili.com/video/av46787694/)
 
 ### 特性
 
-- 安装简单，新手友好，默认提供国内各音乐平台插件（网易云、虾米、QQ）
-- 基于文本的歌单，方便与朋友分享、设备之间同步
-- 提供基于 TCP 的控制协议
-- 类似 `.vimrc` 和 `.emacs` 的配置文件 `.fuorc`
-- 有友善的开发上手文档，核心模块有较好的文档和测试覆盖
+- 稳定、易用：
+  - 一键安装，各流行平台均有打包（如 Arch Linux, Windows, macOS 等）
+  - 有各媒体资源平台的插件，充分且合理的利用全网免费资源（如 Youtube Music 等）
+  - 基础功能完善，桌面歌词、资源智能替换、多音质选择、nowplaying 协议等
+  - 核心模块有较好的测试覆盖、核心接口保持较好的向后兼容
+  - 大模型加持：AI 电台、自然语言转歌单等
+- 可玩性强：
+  - 提供基于 TCP 的交互控制协议
+  - 提供 MCP Server（实验性功能），可对播放器/资源能力进行程序化控制
+  - 基于文本的歌单，方便与朋友分享、设备之间同步
+  - 支持基于 Python 的配置文件 `.fuorc`，类似 `.vimrc` 和 `.emacs`
 
-### 文档
+### 快速试用
 
-详细文档请看：https://feeluown.readthedocs.io/
+使用系统包管理器一键安装 FeelUOwn 及其扩展吧！
 
-开发者/用户[交流群](https://t.me/joinchat/H7k12hG5HYsGy7RVvK_Dwg)
+对于 Arch Linux 和 macOS，你可以分别使用如下方式安装：
+```sh
+# Arch Linux
+yay -S feeluown          # 安装稳定版，最新版的包名为 feeluown-git
+yay -S feeluown-netease  # 按需安装其它扩展
+yay -S feeluown-ytmusic
+yay -S feeluown-bilibili
 
-### 已知的一些插件
+# macOS（推荐优先尝试在 Release 页面下载打包好的安装包！）
+brew tap feeluown/feeluown
+brew install feeluown --with-battery --tsinghua-pypi # 安装 FeelUOwn 以及扩展
+feeluown genicon                     # 在桌面生成 FeelUOwn 图标
+```
 
-除了[feeluown 组织](https://github.com/feeluown)下提供的一些插件，大家如果发现或者自己编写了一些插件，可以在下面进行补充～
-
-| 插件名 | 开发者们  | 状态 |
-| ------- | ------ | -------- |
-| [Discord RPC Rich Precense 服务](https://github.com/BruceZhang1993/feeluown-discordrpc-plugin) | [@BruceZhang1993](https://github.com/BruceZhang1993) | 可用 |
-| [桌面通知](https://github.com/Rapiz1/feeluown-notification-plugin)|[@Rapiz1](https://github.com/rapiz1)| 可用 |
-| [YouTube/bilibili](https://github.com/cosven/rcfiles/blob/master/youtube_provider.py)|[@cosven](https://github.com/cosven) | 能用，但需要折腾 |
+Windows 和 macOS 用户可以在 Release 页面下载预打包好的二进制。
+Gentoo, NixOS, Debian, openSUSE 等 Linux 发行版也支持使用其系统包管理器安装！
+详情可以参考文档：https://feeluown.readthedocs.io/ ，
+也欢迎你加入开发者/用户[交流群](https://t.me/joinchat/H7k12hG5HYsGy7RVvK_Dwg)。
 
 ### 免责声明
 

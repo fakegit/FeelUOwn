@@ -1,17 +1,71 @@
 import json
+import os
 from http.cookies import SimpleCookie
+from urllib.parse import urlparse
 
-from PyQt5.QtCore import pyqtSignal, Qt
-from PyQt5.QtWidgets import QDialog, QTextEdit, QPushButton, \
-    QVBoxLayout, QLabel
+from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtWidgets import (
+    QDialog,
+    QTextEdit,
+    QPushButton,
+    QVBoxLayout,
+    QLabel,
+    QHBoxLayout,
+)
+
 try:
-    from feeluown.gui.widgets.weblogin import WebLoginView
+    from feeluown.gui.widgets.weblogin import WebLoginView  # noqa: F401
 except ImportError:
     has_webengine = False
 else:
     has_webengine = True
 
+
+def is_webengine_disabled_by_flag():
+    """Whether webengine was explicitly disabled via flag/env.
+
+    ``--no-webengine`` / ``FEELUOWN_NO_WEBENGINE=1`` skips the early
+    ``QtWebEngineWidgets`` import in run_app for faster startup. Web login
+    requires webengine, so the dialog must stay disabled in that case even
+    when the package is installed (late import after QApplication may not
+    initialize correctly).
+    """
+    return os.getenv('FEELUOWN_NO_WEBENGINE', '').strip().lower() in (
+        '1', 'true', 'yes')
+
+
+def is_webengine_available():
+    """Whether built-in web login can be offered."""
+    return has_webengine and not is_webengine_disabled_by_flag()
+
+
+try:
+    from feeluown.utils.yt_dlp_cookies import load_cookies  # noqa
+except ImportError:
+    can_load_keyring_cookies = False
+else:
+    can_load_keyring_cookies = True
+
 from feeluown.utils import aio
+from feeluown.i18n import t
+
+
+def try_get_domain_from_uri(uri):
+    """
+    xx.yy.com -> yy.com
+    https://xx.yy.com -> yy.com
+    """
+    try:
+        result = urlparse(uri)
+    except ValueError:
+        return ""
+    # When uri is 'xx.yy.com', then netloc is empty.
+    netloc = result.netloc
+    if not netloc:
+        netloc = result.path
+    if netloc:
+        return ".".join(netloc.split(".")[-2:])
+    return netloc
 
 
 class InvalidCookies(Exception):
@@ -20,6 +74,7 @@ class InvalidCookies(Exception):
 
 class LoginDialog(QDialog):
     """Base class for login dialogs"""
+
     #: login succeed signal
     login_succeed = pyqtSignal()
 
@@ -46,55 +101,110 @@ class CookiesLoginDialog(LoginDialog):
     One usage example: feeluown-qqmusic.
     """
 
-    def __init__(self, uri: str = None, required_cookies_fields=None):
-        if has_webengine and uri and required_cookies_fields:
+    def __init__(self, uri=None, required_cookies_fields=None, domain=None):
+        if is_webengine_available() and uri and required_cookies_fields:
             use_webview = True
-            flags = Qt.Window
         else:
             use_webview = False
-            flags = Qt.Popup
+        # Use Qt.WindowType.Window so that the dialog will not be hidden unexpectedly.
+        # https://github.com/feeluown/FeelUOwn/issues/878#issuecomment-2975105843
+        flags = Qt.WindowType.Window
 
         super().__init__(None, flags)
         self._use_webview = use_webview
         self._uri = uri
+        if domain is None and uri is not None:
+            self._domain = try_get_domain_from_uri(uri)
         self._required_cookies_fields = required_cookies_fields
 
         self.cookies_text_edit = QTextEdit(self)
+        self.tutorial_label = QLabel(self)
         self.hint_label = QLabel(self)
-        self.login_btn = QPushButton('登录', self)
-        self.weblogin_btn = QPushButton('网页登录', self)
+        self.hint_label.setWordWrap(True)
+        self.login_btn = QPushButton(t("cookies-dialog-login-button"), self)
+        self.weblogin_btn = QPushButton(t("cookies-dialog-web-login-btn"), self)
+        self.chrome_btn = QPushButton(t("cookies-dialog-chrome-btn"))
+        self.firefox_btn = QPushButton(t("cookies-dialog-firefox-btn"))
+        self.edge_btn = QPushButton(t("cookies-dialog-edge-btn"))
 
-        self.hint_label.setTextFormat(Qt.RichText)
+        self.tutorial_label.setWordWrap(True)
+        self.tutorial_label.setTextFormat(Qt.TextFormat.RichText)
+        self.hint_label.setTextFormat(Qt.TextFormat.RichText)
 
         self._layout = QVBoxLayout(self)
+        self._layout.setSpacing(0)
+        self._layout.addWidget(self.tutorial_label)
+        self._layout.addSpacing(10)
+        self._layout.addWidget(self.weblogin_btn)
+        self._layout.addSpacing(20)
+        self._h_layout = QHBoxLayout()
+        self._layout.addLayout(self._h_layout)
+        self._h_layout.addWidget(self.chrome_btn)
+        self._h_layout.addWidget(self.firefox_btn)
+        self._h_layout.addWidget(self.edge_btn)
+        self._layout.addSpacing(20)
         self._layout.addWidget(self.cookies_text_edit)
         self._layout.addWidget(self.hint_label)
         self._layout.addWidget(self.login_btn)
-        self._layout.addWidget(self.weblogin_btn)
 
+        self.tutorial_label.setText(t("cookies-dialog-tutorial"))
         self.cookies_text_edit.setAcceptRichText(False)
-        self.cookies_text_edit.setPlaceholderText(
-            '请从浏览器中复制 Cookie：\n\n'
-            'Chrome 复制的 cookie 格式类似：key1=value1; key2=value2\n\n'
-            'Firefox 复制的 cookie 格式类似：{"key1": value1, "key1": value2}'
-        )
+        self.cookies_text_edit.setPlaceholderText(t("cookies-dialog-placeholder"))
 
         if self._use_webview is True:
             self.weblogin_btn.clicked.connect(self._start_web_login)
         else:
             # disable the button if feeluown does not support
-            if uri and required_cookies_fields and not has_webengine:
+            if uri and required_cookies_fields and not is_webengine_available():
                 self.weblogin_btn.setEnabled(False)
             else:
                 # hide the button if provider does not support
                 self.weblogin_btn.hide()
+
+        if not (can_load_keyring_cookies and self._domain):
+            self.chrome_btn.setDisabled(True)
+            self.edge_btn.setDisabled(True)
+            self.firefox_btn.setDisabled(True)
+
+        self.chrome_btn.clicked.connect(lambda: self._start_keyring_login("chrome"))
+        self.firefox_btn.clicked.connect(lambda: self._start_keyring_login("firefox"))
+        self.edge_btn.clicked.connect(lambda: self._start_keyring_login("edge"))
         self.login_btn.clicked.connect(lambda: aio.create_task(self.login()))
         self.login_succeed.connect(self.hide)
 
     def _start_web_login(self):
-        self._web_login = WebLoginView(self._uri, self._required_cookies_fields)
+        # Import lazily: WebLoginView pulls QtWebEngineWidgets, which may be
+        # unavailable (not installed) or explicitly skipped via
+        # --no-webengine. Fail gracefully instead of crashing the slot.
+        try:
+            from feeluown.gui.widgets.weblogin import WebLoginView as _WebLoginView
+        except ImportError as e:
+            self.show_hint(t("cookies-dialog-web-login-btn") + f": {e}",
+                           color="red")
+            return
+        if is_webengine_disabled_by_flag():
+            self.show_hint(t("cookies-dialog-web-login-btn") + ": disabled "
+                           "by --no-webengine", color="orange")
+            return
+        self._web_login = _WebLoginView(self._uri, self._required_cookies_fields)
         self._web_login.succeed.connect(self._on_web_login_succeed)
         self._web_login.show()
+
+    def _start_keyring_login(self, browser):
+        cookie_dict = self._get_cookies_from_browser(browser)
+        self.cookies_text_edit.setText(json.dumps(cookie_dict, indent=2))
+        aio.create_task(self.login())
+
+    def _get_cookies_from_browser(self, browser):
+        """
+        :param browser: chrome,firefox,edge
+        """
+        jar = load_cookies(None, [browser], None)
+        cookie_dict = {}
+        for cookie in jar:
+            if self._domain in cookie.domain:
+                cookie_dict[cookie.name] = cookie.value
+        return cookie_dict
 
     def _on_web_login_succeed(self, cookies):
         self.cookies_text_edit.setText(json.dumps(cookies, indent=2))
@@ -112,7 +222,7 @@ class CookiesLoginDialog(LoginDialog):
         """
         cookies: uid=111; userAction=222;
         """
-        cookie = SimpleCookie()
+        cookie = SimpleCookie()  # type: ignore[var-annotated]
         cookie.load(text)
         cookie_dict = {}
         for _, morsel in cookie.items():
@@ -127,16 +237,18 @@ class CookiesLoginDialog(LoginDialog):
         """
         # We assume users only use firefox and chrome. Cookies from firefox are
         # in json format. Cookies copied from chrome are in text format.
-        parsers = (('json', self._parse_json_cookies),
-                   ('text', self._parse_text_cookies))
+        parsers = (
+            ("json", self._parse_json_cookies),
+            ("text", self._parse_text_cookies),
+        )
         text = self.cookies_text_edit.toPlainText()
         cookies = None
         for name, parse in parsers:
             cookies = parse(text)
             if cookies is None:
-                self.show_hint(f'使用 {name} 解析器解析失败，尝试下一种', color='orange')
+                self.show_hint(t("cookies-parse-fail", parser=name), color="orange")
             else:
-                self.show_hint(f'使用 {name} 解析器解析成功')
+                self.show_hint(t("cookies-parse-success", parser=name))
                 break
         return cookies
 
@@ -147,7 +259,7 @@ class CookiesLoginDialog(LoginDialog):
             green for success
         """
         if color is None:
-            color = ''
+            color = ""
         self.hint_label.setText(f"<p style='color: {color}'>{text}</p>")
 
     async def login(self):
@@ -164,9 +276,9 @@ class CookiesLoginDialog(LoginDialog):
         try:
             user = await self.user_from_cookies(cookies)
         except InvalidCookies as e:
-            self.show_hint(str(e), color='red')
+            self.show_hint(str(e), color="red")
         else:
-            self.show_hint('保存用户信息到 FeelUOwn 数据目录')
+            self.show_hint(t("cookies-save-user-info"))
             self.dump_user_cookies(user, cookies)
             self.setup_user(user)
             self.login_succeed.emit()
@@ -178,14 +290,14 @@ class CookiesLoginDialog(LoginDialog):
         """
         cookies = self.load_user_cookies()
         if cookies is not None:
-            self.show_hint('正在尝试加载已有用户...', color='green')
+            self.show_hint(t("cookies-loading-existing-user"), color="green")
             self.cookies_text_edit.setText(json.dumps(cookies, indent=2))
             aio.create_task(self.login_with_cookies(cookies))
 
     def setup_user(self, user):
         """Setup user session
 
-        :type user: feeluown.models.UserModel
+        :type user: feeluown.library.UserModel
         """
         raise NotImplementedError
 
@@ -193,7 +305,7 @@ class CookiesLoginDialog(LoginDialog):
         """Create a user model from cookies dict
 
         :type cookies: dict
-        :rtype: feeluown.models.UserModel
+        :rtype: feeluown.library.UserModel
         """
         raise NotImplementedError
 
@@ -214,17 +326,17 @@ class CookiesLoginDialog(LoginDialog):
         Generally, you can store the cookies in FeelUOwn data directory
         with specifical filename.
 
-        :type user: feeluown.models.UserModel
+        :type user: feeluown.library.UserModel
         :type cookies: dict
         """
         raise NotImplementedError
 
 
-if __name__ == '__main__':
-    from PyQt5.QtWidgets import QApplication
+if __name__ == "__main__":
+    from PyQt6.QtWidgets import QApplication
 
     app = QApplication([])
     widget = CookiesLoginDialog()
     widget.show()
-    widget.show_hint('格式可能不正确', color='orange')
+    widget.show_hint("Format might be incorrect", color="orange")
     app.exec()
